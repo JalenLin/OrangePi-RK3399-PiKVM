@@ -31,11 +31,11 @@ say "1. Does the hardware encoder work at all?"
 if [[ ! -e /dev/mpp_service && ! -e /dev/vpu_service ]]; then
     bad "no /dev/mpp_service or /dev/vpu_service - MPP has no kernel side to talk to"
     ls -l /dev/{mpp,vpu,rkvenc}* 2>/dev/null || true
-    # This was the state on every image before kernel patch 0013. The drivers
+    # This was the state on every image before kernel patch 0001. The drivers
     # were built in; the device tree nodes they bind to were all disabled, so
     # nothing registered. If you see this, check the DTB rather than the
     # config: fdtget -t s <dtb> /mpp-srv status should say "okay".
-    bad "if this is an image without kernel patch 0013, that is the reason"
+    bad "if this is an image without kernel patch 0001, that is the reason"
 fi
 
 if [[ -x "${PREFIX}/bin/mpi_enc_test" ]]; then
@@ -113,7 +113,7 @@ cat <<'NOTE'
   whether this board's H.264 encoder works at all. If it fails, the problem is
   the kernel side and no userspace shimming will help - check the DTB before
   the config, since a =y driver with a disabled node registers nothing. That
-  was the state of every image before kernel patch 0013.
+  was the state of every image before kernel patch 0001.
 
   This script is now a diagnostic, not an experiment. Both codecs run in
   hardware on the shipped image, through the same VEPU2:

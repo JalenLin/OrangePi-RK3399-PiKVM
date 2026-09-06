@@ -258,12 +258,12 @@ RUN systemctl enable kvmd-media kvmd-janus
 
 # Nothing here retargets janus's audio capture, on purpose. kvmd ships
 # /etc/kvmd/janus/janus.plugin.ustreamer.jcfg asking for "hw:tc358743,0", and
-# patches/kernel-6.12/0015 names the card it creates "tc358743" so that the
+# patches/kernel-6.12/0001 names the card it creates "tc358743" so that the
 # stock config is already correct. The alternative - name the card for the
 # TC358749 actually fitted, and sed this file - was rejected: it is a pacman
 # backup file, so an upstream change to it arrives as a .pacnew, and merging
 # that the usual way would silently drop the edit and take WebRTC audio with
-# it. See the comment above the hdmiin-sound node in patch 0015.
+# it. See the comment above the hdmiin-sound node in patch 0001.
 
 ARG TARGET_ROOT_PASSWORD
 
