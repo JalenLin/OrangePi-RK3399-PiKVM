@@ -1,0 +1,67 @@
+# Local overrides. Safe to edit - this file is yours, main.yaml is not.
+
+kvmd:
+    info:
+        hw:
+            # See /usr/lib/pikvm/vcgencmd for why this is not the real thing.
+            vcgencmd_cmd: [/usr/lib/pikvm/vcgencmd]
+
+# --- ATX ------------------------------------------------------------------
+#
+# Off by default; main.yaml says why. The pin assignment below is real - it
+# comes from the vendor schematic (sheet 29, connector J9002) and from what
+# this image's device tree already claims - so uncommenting it is safe once
+# the optocouplers exist. docs/hardware.md has the full derivation.
+#
+#   kvmd option           header pin   RK3399     gpio2 line
+#   power_switch_pin          16       GPIO2_A2        2
+#   reset_switch_pin          18       GPIO2_A3        3
+#   power_led_pin              7       GPIO2_A0        0
+#   hdd_led_pin               12       GPIO2_A1        1
+#
+# Two things about this that are not obvious, and are the reason it is not
+# just kvmd's defaults:
+#
+#   * The header is labelled like a Raspberry Pi's, and kvmd's defaults are
+#     BCM 22/23/24/27 - but GPIO22 (pin 15) and GPIO27 (pin 13) are UART0 on
+#     this board, and UART0 carries the Bluetooth module. Taking them costs
+#     the board its Bluetooth, and they are 1.8 V pins besides.
+#   * The two outputs sit on the two pins whose reset default is a pull-down.
+#     Nothing configures these pins before kvmd claims them, so a pin that
+#     defaults high is a power or reset button held down through boot.
+#
+# Do not move any of this onto GPIO6/GPIO13/GPIO19/GPIO26/GPIO16/GPIO20
+# (pins 31/33/35/37/36/38). That is the HDMI IN block.
+#
+# Confirmed on the board, but with pinctrl rather than gpioinfo: all four read
+# "(MUX UNCLAIMED) (GPIO UNCLAIMED)" in
+# /sys/kernel/debug/pinctrl/pinctrl-rockchip-pinctrl/pinmux-pins, at pins
+# 64-67 (that file numbers pins as bank*32 + line). gpioinfo is the wrong tool
+# here - it lists UART0's own pins as free, because pinctrl ownership is not a
+# gpiod consumer.
+#
+# kvmd:
+#     atx:
+#         type: gpio
+#         gpio:
+#             device: /dev/kvmd-gpio2
+#
+#             # Outputs. Each drives an optocoupler that shorts the
+#             # corresponding front-panel header pins. Active high; kvmd
+#             # drives them low when it claims them.
+#             power_switch_pin: 2
+#             reset_switch_pin: 3
+#
+#             # Inputs, read through optocouplers across the target's LEDs.
+#             # Both lines default to a pull-up, so a non-conducting
+#             # optocoupler reads 1 - hence inverted. Confirm by powering the
+#             # target on and seeing which way round the web UI gets it.
+#             power_led_pin: 0
+#             power_led_inverted: true
+#             hdd_led_pin: 1
+#             hdd_led_inverted: true
+#
+#             # A "short press" and a "hold to force off". 5.5 s is longer
+#             # than the 4 s every ATX supply needs, with margin.
+#             click_delay: 0.1
+#             long_click_delay: 5.5

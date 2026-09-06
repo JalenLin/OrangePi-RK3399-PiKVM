@@ -1,0 +1,104 @@
+Wi-Fi on this board
+===================
+
+The hardware works out of the box; the credentials are yours to add. Nothing
+here is enabled by default, because a wpa_supplicant with no network block
+fails at boot and would leave a permanently red systemctl status on an image
+most people will run over ethernet.
+
+To connect:
+
+    wpa_passphrase 'YOUR-SSID' 'YOUR-PASSPHRASE' \
+        > /etc/wpa_supplicant/wpa_supplicant-wlan0.conf
+    chmod 600 /etc/wpa_supplicant/wpa_supplicant-wlan0.conf
+    systemctl enable --now wpa_supplicant@wlan0
+
+systemd-networkd picks it up from there - see
+/etc/systemd/network/wlan.network, which is already installed and will DHCP
+the interface once it associates. Ethernet stays preferred while both are up.
+
+Note that wpa_passphrase writes the plaintext passphrase into the file as a
+comment above the hashed PSK. Delete that line if it bothers you; the hash on
+its own is enough to connect.
+
+Set your country while you are in there:
+
+    country=TW          # first line of the file, ISO 3166 alpha-2
+
+It is not cosmetic. Without it the kernel stays on the world regulatory
+domain "00", and 5 GHz behaves differently from what you expect - see below.
+
+
+5 GHz, DFS, and channels you cannot see
+---------------------------------------
+
+If a 5 GHz network is missing from a scan while its 2.4 GHz twin shows up,
+check which channel it is on before assuming anything is broken.
+
+Channels 52-144 (5250-5330 and 5490-5730 MHz) are DFS: radar-sharing
+channels, which a client may only listen on passively. Measured on this
+board: with channels 100-144 enabled and three full scans, **nothing at all
+was found anywhere in 5250-5730**, while APs on 5220, 5785 and 5825 came back
+every time. The BCM4356 firmware does not appear to scan the DFS block for a
+station, whatever the regulatory domain says about it.
+
+The driver says as much if you ask it. Under `country TW`, a non-DFS channel
+advertises what it can do and a DFS one advertises nothing but the hazard:
+
+    * 5745 MHz [149]
+      Maximum TX power: 20.0 dBm
+      Channel widths: 20MHz HT40+ VHT80
+    * 5540 MHz [108]
+      Maximum TX power: 20.0 dBm
+      Radar detection                     <- and no channel widths at all
+
+So a router on channel 108 is invisible here. The fix is the router's, and it
+costs nothing: move its 5 GHz radio to a non-DFS channel - 36, 40, 44, 48 at
+the bottom, or 149, 153, 157, 161, 165 at the top.
+
+Channel width is not the problem and does not have to be given up. A station
+scans on the primary 20 MHz channel, so an 80 MHz AP is found - or not - by
+its primary alone. Both non-DFS blocks take a full 80 MHz:
+
+    36 / 40 / 44 / 48     primary 36,  centre 42   5150-5250, 23 dBm in TW
+    149 / 153 / 157 / 161 primary 149, centre 155  5725-5850, 30 dBm in TW
+
+The upper block is the better of the two here: same width, 7 dB more power
+allowed, and no DFS anywhere near it. Channel 165 is 20 MHz only and cannot
+be part of an 80 MHz block.
+
+Two related things that are easy to trip over:
+
+  * `iw reg set XX` does nothing while you are associated. An AP's beacon
+    carries a country IE, and cfg80211 intersects that with your setting -
+    `iw reg get` then reports "country 98", the intersection, and the channel
+    list is whatever survived it. Stop wpa_supplicant first if you want to
+    see what your own setting does.
+
+  * Going straight from one country to another does not always take. The
+    driver skips the update when the firmware already holds the code it is
+    being handed, so the channel list is not rebuilt. `iw reg set 00` first,
+    then the country you want.
+
+What the hardware is
+--------------------
+
+An AP6356S module: a Broadcom BCM4356 on SDIO, at mmc2. It is driven by
+mainline brcmfmac, not by Rockchip's bcmdhd, which the vendor defconfig
+selects and which cannot work on this device tree - the reasoning is in
+config/kernel-fragments/pikvm.config in the build tree.
+
+Two things have to line up for the chip to come up, and both are already in
+the image:
+
+  * firmware      /usr/lib/firmware/brcm/brcmfmac4356-sdio.bin and .clm_blob,
+                  from linux-firmware
+  * per-board     /usr/lib/firmware/brcm/brcmfmac4356-sdio.AP6356S.txt, also
+    NVRAM         from linux-firmware. brcmfmac finds it by the board-type
+                  the device tree declares; kernel patch 0001 is what sets it.
+
+If wlan0 never appears, that pair is the first thing to check:
+
+    dmesg | grep brcmfmac
+
+A "Direct firmware load for brcm/... failed" line names the file it wanted.

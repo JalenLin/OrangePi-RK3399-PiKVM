@@ -1,0 +1,360 @@
+libv4l-rkmpp: accept VIDIOC_S_CTRL, and stop padding the encoded size
+
+Two independent defects, both of which stop ustreamer from using this
+plugin as a hardware MJPEG encoder. Measured on an OrangePi RK3399 with
+the MPP VEPU2 enabled (kernel patch 0013).
+
+1. VIDIOC_S_CTRL returns ENOTTY.
+
+   Every control the encoder supports is already implemented - bitrate,
+   the H.264 profile/level/QP set, header mode, the lot - but only under
+   VIDIOC_S_EXT_CTRLS. The older single-control ioctl falls through to
+   the default case and returns ENOTTY.
+
+   That is not a cosmetic gap. ustreamer's V4L2 M2M encoder sets its
+   controls *before* it touches a format, and treats a failed S_CTRL as
+   fatal, so it aborts on the first one and never reaches the code that
+   works. For --encoder=m2m-video the whole difference between "unusable"
+   and "working" is one control, V4L2_CID_MPEG_VIDEO_BITRATE, which this
+   plugin has handled all along.
+
+   Wrap the v4l2_control into a one-element v4l2_ext_controls and forward
+   it. The class is derived from the ID, so a control outside the MPEG
+   class still fails, in exactly the place it failed before.
+
+2. The encoder is told the macroblock-aligned size.
+
+   rkmpp_try_fmt() rounds width and height up to whole macroblocks in the
+   caller's struct, and rkmpp_s_fmt() then stores that rounded size as the
+   queue format. rkmpp_enc_apply_prep_cfg() reads it back and hands it to
+   MPP as prep:width/prep:height, so 1920x1080 is encoded, and marked in
+   the bitstream, as 1920x1088 - eight rows of padding presented as
+   picture. MPP itself gets this right: mpi_enc_test on the same hardware
+   produces a correctly-sized 1920x1080 stream.
+
+   The rounded size is the right thing for sizing buffers and must stay in
+   queue->format. Record the requested size alongside it and use that for
+   the encoder configuration.
+
+   try_fmt both rounds up and clamps to the hardware limits. A clamp has
+   to stand - it is the hardware talking - so the requested size is only
+   honoured when it lies within one macroblock below the value that came
+   back, which is the signature of rounding rather than clamping.
+
+3. A compressed format with sizeimage == 0 is rejected.
+
+   V4L2 has the driver fill sizeimage in; requiring the application to
+   supply it turns a legal request into EINVAL. ustreamer sets it only on
+   the H.264 path - for MJPEG it leaves the field at zero and expects a
+   default - so with (1) and (2) fixed this is still the last thing
+   between it and the hardware encoder.
+
+   Default to one byte per macroblock-padded pixel, with a floor for the
+   small sizes where a JPEG's headers outweigh its data. A 1080p JPEG of
+   pure noise at quality 80, far worse than any screen, measured under
+   half of that.
+
+4. Importing a DMABUF always asks for write access.
+
+   rkmpp_copy_buffer() maps the caller's dma-buf PROT_READ|PROT_WRITE
+   whichever way it is about to copy. VIDIOC_EXPBUF with flags == 0
+   hands back a read-only dma-buf - videobuf2 passes flags & O_ACCMODE
+   through and O_RDONLY is zero - so importing a capture buffer fails,
+   and ustreamer exports exactly that way. Map read-only when the copy
+   only reads.
+
+5. The JPEG encoder is unreachable through its own API.
+
+   V4L2_PIX_FMT_JPEG is not in the encoder's format table, so an
+   application asking for one still image per buffer gets EINVAL and has
+   to pretend it wants a video stream. And rkmpp_enc_s_ext_ctrls()
+   already handles V4L2_CID_JPEG_COMPRESSION_QUALITY, but rejects
+   anything outside the MPEG control class first - so a control that was
+   implemented all along could never be set. Add the fourcc, and let the
+   JPEG class through.
+
+6. MJPEG quality is left to a rate controller.
+
+   Only jpeg:q_factor was set, leaving qf_min/qf_max at 1/99 and CBR in
+   charge, so the quality factor moves frame to frame. Constant quality
+   is what MJPEG is for, and a hunting quality factor also means
+   identical input encodes to different bytes, which silently breaks any
+   consumer that drops duplicate frames by comparing them. With a static
+   screen, ustreamer's --drop-same-frames went from ~1 fps on the wire
+   to 12. Pin qf_min and qf_max to the requested factor.
+
+The existing VIDIOC_S_SELECTION path already overrides (2), so anything
+that sets a crop explicitly is unaffected.
+
+diff --git a/include/libv4l-rkmpp.h b/include/libv4l-rkmpp.h
+index 722a81a..f71e2c3 100644
+--- a/include/libv4l-rkmpp.h
++++ b/include/libv4l-rkmpp.h
+@@ -110,6 +110,10 @@ extern int rkmpp_log_level;
+ #define MPP_VIDEO_CodingNone	MPP_VIDEO_CodingUnused
+ 
+ #define RKMPP_MB_DIM		16
++
++/* Floor for a defaulted compressed sizeimage; a JPEG's headers alone are
++ * larger than width*height once the picture gets small enough. */
++#define RKMPP_MIN_COMPRESSED_SIZE	(128 * 1024)
+ #define RKMPP_SB_DIM		64
+ 
+ #define RKMPP_MAX_PLANES	3
+@@ -236,6 +240,15 @@ struct rkmpp_buf_queue {
+ 
+ 	const struct rkmpp_fmt *rkmpp_format;
+ 	struct v4l2_pix_format_mplane format;
++
++	/*
++	 * The size requested by S_FMT, before try_fmt rounded it up to whole
++	 * macroblocks. "format" carries the rounded size because that is what
++	 * sizes the buffers; the encoder has to be told the real one, or a
++	 * 1080-line frame is encoded, and marked in the bitstream, as 1088.
++	 */
++	uint32_t visible_width;
++	uint32_t visible_height;
+ };
+ 
+ /**
+diff --git a/src/libv4l-rkmpp-enc.c b/src/libv4l-rkmpp-enc.c
+index 2839119..5b6aaae 100644
+--- a/src/libv4l-rkmpp-enc.c
++++ b/src/libv4l-rkmpp-enc.c
+@@ -113,6 +113,29 @@ static struct rkmpp_fmt rkmpp_enc_fmts[] = {
+ 			.max_height = 1088,
+ 			.step_height = RKMPP_MB_DIM,
+ 		}
++	},
++	/*
++	 * The same encoder under the fourcc that V4L2 defines for a single
++	 * still image. MJPEG is a sequence of these, and MPP is handed the
++	 * identical coding type either way, but an application asking for
++	 * one JPEG per buffer is entitled to say so - ustreamer's m2m-image
++	 * encoder does, and was refused. Note "JPEG" is a substring of
++	 * "MJPEG", so a device configured with codecs=MJPEG exposes both.
++	 */
++	{
++		.name = "JPEG",
++		.fourcc = V4L2_PIX_FMT_JPEG,
++		.num_planes = 1,
++		.type = MPP_VIDEO_CodingMJPEG,
++		.format = MPP_FMT_BUTT,
++		.frmsize = {
++			.min_width = 96,
++			.max_width = 1920,
++			.step_width = RKMPP_MB_DIM,
++			.min_height = 96,
++			.max_height = 1088,
++			.step_height = RKMPP_MB_DIM,
++		}
+ 	}
+ };
+ 
+@@ -531,7 +554,23 @@ static int rkmpp_enc_apply_mjpeg_cfg(struct rkmpp_enc_context *enc)
+ 		goto err;
+ 	}
+ 
+-	mpp_enc_cfg_set_s32(cfg, "jpeg:q_factor", enc->mjpeg.quality ? enc->mjpeg.quality : 80);
++	/*
++	 * Pin the quality factor instead of leaving the rate controller a
++	 * range to hunt within. Two reasons. Constant quality is what MJPEG
++	 * is for - a screen that is not changing should cost nothing, not a
++	 * steady bitrate. And with a range, identical input encodes to
++	 * different bytes every frame, which silently defeats any consumer
++	 * that drops duplicate frames by comparing them: ustreamer's
++	 * --drop-same-frames went from dropping ~59 of 60 to almost none,
++	 * and an idle screen went from 1 fps on the wire to 12.
++	 */
++	{
++		const int qf = enc->mjpeg.quality ? enc->mjpeg.quality : 80;
++
++		mpp_enc_cfg_set_s32(cfg, "jpeg:q_factor", qf);
++		mpp_enc_cfg_set_s32(cfg, "jpeg:qf_min", qf);
++		mpp_enc_cfg_set_s32(cfg, "jpeg:qf_max", qf);
++	}
+ 
+ 	ret = ctx->mpi->control(ctx->mpp, MPP_ENC_SET_CFG, cfg);
+ 	if (ret != MPP_OK) {
+@@ -565,8 +604,12 @@ static int rkmpp_enc_apply_input_cfg(struct rkmpp_enc_context *enc)
+ 		goto err;
+ 	}
+ 
+-	enc->width = enc->crop.width ? enc->crop.width : fmt->width;
+-	enc->height = enc->crop.height ? enc->crop.height : fmt->height;
++	enc->width = enc->crop.width ? enc->crop.width :
++		(ctx->output.visible_width ?
++		 ctx->output.visible_width : fmt->width);
++	enc->height = enc->crop.height ? enc->crop.height :
++		(ctx->output.visible_height ?
++		 ctx->output.visible_height : fmt->height);
+ 	enc->hstride = fmt->plane_fmt[0].bytesperline;
+ 	enc->vstride = fmt->plane_fmt[0].sizeimage /
+ 		fmt->plane_fmt[0].bytesperline;
+@@ -720,6 +763,7 @@ static int rkmpp_enc_streamon(struct rkmpp_enc_context *enc,
+ 		enc->type = VP8;
+ 		break;
+ 	case V4L2_PIX_FMT_MJPEG:
++	case V4L2_PIX_FMT_JPEG:
+ 		enc->type = MJPEG;
+ 		break;
+ 	default:
+@@ -994,8 +1038,14 @@ static int rkmpp_enc_s_ext_ctrls(struct rkmpp_enc_context *enc,
+ 
+ 	ENTER();
+ 
++	/*
++	 * V4L2_CID_JPEG_COMPRESSION_QUALITY is handled below but lives in the
++	 * JPEG class, so this check made it unreachable: a control that was
++	 * implemented all along could never be set.
++	 */
+ 	if (ext_ctrls->ctrl_class != V4L2_CTRL_CLASS_MPEG &&
+-	    ext_ctrls->ctrl_class != V4L2_CID_MPEG_CLASS)
++	    ext_ctrls->ctrl_class != V4L2_CID_MPEG_CLASS &&
++	    ext_ctrls->ctrl_class != V4L2_CTRL_CLASS_JPEG)
+ 		RETURN_ERR(EINVAL, -1);
+ 
+ 	for (i = 0; i < ext_ctrls->count; i++) {
+@@ -1224,6 +1274,22 @@ static int rkmpp_enc_s_ext_ctrls(struct rkmpp_enc_context *enc,
+ 	return 0;
+ }
+ 
++static int rkmpp_enc_s_ctrl(struct rkmpp_enc_context *enc,
++			    struct v4l2_control *ctrl)
++{
++	struct v4l2_ext_control ext_ctrl = {
++		.id = ctrl->id,
++		.value = ctrl->value,
++	};
++	struct v4l2_ext_controls ext_ctrls = {
++		.ctrl_class = V4L2_CTRL_ID2CLASS(ctrl->id),
++		.count = 1,
++		.controls = &ext_ctrl,
++	};
++
++	return rkmpp_enc_s_ext_ctrls(enc, &ext_ctrls);
++}
++
+ static int rkmpp_enc_cmd(struct rkmpp_enc_context *enc,
+ 			 struct v4l2_encoder_cmd *cmd)
+ {
+@@ -1379,6 +1445,19 @@ int rkmpp_enc_ioctl(void *data, unsigned long cmd, void *arg)
+ 	case VIDIOC_S_EXT_CTRLS:
+ 		ret = rkmpp_enc_s_ext_ctrls(enc, arg);
+ 		break;
++	case VIDIOC_S_CTRL:
++		/*
++		 * Every control this plugin understands is already implemented,
++		 * but only behind S_EXT_CTRLS. Applications that use the older
++		 * single-control ioctl - ustreamer among them - got ENOTTY from
++		 * the default case and gave up before touching a format, which
++		 * made the encoder look unusable when only the doorbell was
++		 * missing. Wrap and forward; the class comes from the ID, so an
++		 * out-of-class control still fails in one place, inside
++		 * rkmpp_enc_s_ext_ctrls().
++		 */
++		ret = rkmpp_enc_s_ctrl(enc, arg);
++		break;
+ 	case VIDIOC_ENCODER_CMD:
+ 		ret = rkmpp_enc_cmd(enc, arg);
+ 		break;
+diff --git a/src/libv4l-rkmpp.c b/src/libv4l-rkmpp.c
+index 53b743f..b4ab694 100644
+--- a/src/libv4l-rkmpp.c
++++ b/src/libv4l-rkmpp.c
+@@ -335,8 +335,27 @@ int rkmpp_try_fmt(struct rkmpp_context *ctx, struct v4l2_format *f)
+ 
+ 	if (compressed) {
+ 		if (pix_fmt_mp->plane_fmt[0].sizeimage == 0) {
+-			LOGE("sizeimage of compressed format must be given\n");
+-			RETURN_ERR(EINVAL, -1);
++			/*
++			 * V4L2 has the driver fill sizeimage in, not the
++			 * application; requiring it here rejects callers that
++			 * are doing nothing wrong. ustreamer sets it only for
++			 * H.264 - for MJPEG it leaves the field at zero and
++			 * expects a default - so this refusal is the whole
++			 * reason it cannot use the MJPEG encoder.
++			 *
++			 * One byte per padded pixel. A 1080p JPEG of pure
++			 * noise at quality 80, which is far worse than any
++			 * screen, measured under half of that.
++			 */
++			uint32_t size =
++				round_up(pix_fmt_mp->width, RKMPP_MB_DIM) *
++				round_up(pix_fmt_mp->height, RKMPP_MB_DIM);
++
++			if (size < RKMPP_MIN_COMPRESSED_SIZE)
++				size = RKMPP_MIN_COMPRESSED_SIZE;
++
++			pix_fmt_mp->plane_fmt[0].sizeimage = size;
++			LOGV(1, "defaulted compressed sizeimage to %d\n", size);
+ 		}
+ 
+ 		pix_fmt_mp->num_planes = fmt->num_planes;
+@@ -399,11 +418,15 @@ int rkmpp_try_fmt(struct rkmpp_context *ctx, struct v4l2_format *f)
+ int rkmpp_s_fmt(struct rkmpp_context *ctx, struct v4l2_format *f)
+ {
+ 	struct v4l2_pix_format_mplane *pix_fmt_mp = &f->fmt.pix_mp;
++	uint32_t req_width, req_height;
+ 	struct rkmpp_buf_queue *queue;
+ 	int ret;
+ 
+ 	ENTER();
+ 
++	req_width = pix_fmt_mp->width;
++	req_height = pix_fmt_mp->height;
++
+ 	queue = rkmpp_get_queue(ctx, f->type);
+ 	if (!queue)
+ 		RETURN_ERR(errno, -1);
+@@ -430,6 +453,21 @@ int rkmpp_s_fmt(struct rkmpp_context *ctx, struct v4l2_format *f)
+ 		rkmpp_find_fmt(ctx, pix_fmt_mp->pixelformat);
+ 	queue->format = *pix_fmt_mp;
+ 
++	/*
++	 * Undo the macroblock rounding, and only that. try_fmt both rounds up
++	 * and clamps to the hardware's limits; a clamp must stand, so accept
++	 * the requested size only when it sits within one macroblock below
++	 * what came back.
++	 */
++	queue->visible_width = pix_fmt_mp->width;
++	queue->visible_height = pix_fmt_mp->height;
++	if (req_width && req_width <= pix_fmt_mp->width &&
++	    pix_fmt_mp->width - req_width < RKMPP_MB_DIM)
++		queue->visible_width = req_width;
++	if (req_height && req_height <= pix_fmt_mp->height &&
++	    pix_fmt_mp->height - req_height < RKMPP_MB_DIM)
++		queue->visible_height = req_height;
++
+ 	LEAVE();
+ 	return 0;
+ }
+diff --git a/src/utils.c b/src/utils.c
+index 1274339..b88a276 100644
+--- a/src/utils.c
++++ b/src/utils.c
+@@ -54,8 +54,22 @@ static int rkmpp_copy_buffer(struct rkmpp_context *ctx,
+ 
+ 		if (buffer->memory == V4L2_MEMORY_DMABUF) {
+ 			int fd = rkmpp_buffer->planes[i].fd;
++			/*
++			 * Only ask for the access this direction needs.
++			 * copy_to reads from the MPP buffer and writes here;
++			 * the other way round this mapping is read-only.
++			 *
++			 * It matters because VIDIOC_EXPBUF with flags == 0
++			 * gives a read-only dma-buf - videobuf2 passes
++			 * flags & O_ACCMODE straight through, and O_RDONLY is
++			 * zero - so demanding PROT_WRITE to import a capture
++			 * buffer fails on a caller that did nothing wrong.
++			 * ustreamer exports exactly that way, which is why
++			 * its INPUT-DMA queue never got off the ground here.
++			 */
+ 			addrs[i] = mmap(NULL, sizes[i],
+-					PROT_READ | PROT_WRITE,
++					copy_to ? (PROT_READ | PROT_WRITE)
++						: PROT_READ,
+ 					MAP_SHARED, fd, offsets[i]);
+ 			if (addrs[i] == MAP_FAILED)
+ 				goto out;

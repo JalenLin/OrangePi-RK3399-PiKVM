@@ -1,0 +1,12 @@
+/sources/
+/output/
+/.cache/
+*.img
+*.img.xz
+*.tar.gz
+
+# Working notes and debugging logs. These live in a separate private repo -
+# they carry lab IPs, SSIDs and first-person session narrative that has no
+# business in a public tree. The durable findings from them are extracted
+# into docs/.
+/notes/

@@ -1,0 +1,273 @@
+diff --git a/drivers/media/platform/rockchip/isp1/capture.c b/drivers/media/platform/rockchip/isp1/capture.c
+index 8d15f01bf..98bd48f2c 100644
+--- a/drivers/media/platform/rockchip/isp1/capture.c
++++ b/drivers/media/platform/rockchip/isp1/capture.c
+@@ -2062,6 +2092,170 @@ static int rkisp1_querycap(struct file *file, void *priv,
+ 	return 0;
+ }
+ 
++/*
++ * DV timings pass-through to the HDMI bridge.
++ *
++ * On a Raspberry Pi PiKVM the capture node *is* the bridge, so ustreamer's
++ * --dv-timings talks to it directly: it calls VIDIOC_QUERY_DV_TIMINGS to see
++ * what the source is sending, VIDIOC_S_DV_TIMINGS to lock onto it, and repeats
++ * that whenever the picture drops - which is how the stream follows a target
++ * that switches from 640x480 in its BIOS to 1080p once it has booted.
++ *
++ * Here the capture node is the ISP's main path, three entities downstream of
++ * the bridge, and it implements none of those ioctls:
++ *
++ *   CAP: Querying DV-timings (apply=0) ...
++ *   CAP: Failed to query DV-timings, trying QuerySTD ...
++ *
++ * ustreamer then never captures a frame and reports online=0 forever. The
++ * alternative is to pin a resolution on the command line and drive
++ * media-ctl/v4l2-ctl by hand from outside, which cannot follow a source that
++ * changes mode.
++ *
++ * So forward all five to the sensor subdev. S_DV_TIMINGS additionally re-reads
++ * the sensor format and re-runs the pipeline defaults, so the ISP sink/source
++ * pads and the MP/SP default sizes follow the new timings - the work that
++ * otherwise has to be done with media-ctl before every stream.
++ */
++/*
++ * Walk upstream from the ISP until we find a subdev that actually implements
++ * DV timings.
++ *
++ * dev->active_sensor / dev->sensors[] is not it: the subdev bound to the ISP
++ * over the async notifier is the MIPI D-PHY, because that is what sits in the
++ * ISP's DT port. The D-PHY forwards g_frame_interval upstream but nothing
++ * else, so asking it for DV timings just returns -ENOIOCTLCMD, which the V4L2
++ * core reports to userspace as ENOTTY - indistinguishable from not having
++ * implemented the ioctl at all.
++ *
++ * The real chain here is tc358749 -> mipi-dphy-rx -> rkisp1, so walk the sink
++ * pads up the graph and take the first entity that answers.
++ */
++#define RKISP1_MAX_SD_DEPTH 8
++
++static struct v4l2_subdev *rkisp1_get_sensor_sd(struct rkisp1_device *dev)
++{
++	struct media_entity *me = &dev->isp_sdev.sd.entity;
++	unsigned int depth;
++
++	for (depth = 0; depth < RKISP1_MAX_SD_DEPTH; depth++) {
++		struct media_pad *remote = NULL;
++		struct v4l2_subdev *sd;
++		unsigned int i;
++
++		for (i = 0; i < me->num_pads; i++) {
++			if (!(me->pads[i].flags & MEDIA_PAD_FL_SINK))
++				continue;
++			remote = media_pad_remote_pad_first(&me->pads[i]);
++			if (remote)
++				break;
++		}
++		if (!remote || !is_media_entity_v4l2_subdev(remote->entity))
++			return NULL;
++
++		me = remote->entity;
++		sd = media_entity_to_v4l2_subdev(me);
++		if (sd->ops && sd->ops->pad && sd->ops->pad->query_dv_timings)
++			return sd;
++	}
++	return NULL;
++}
++
++static int rkisp1_g_dv_timings(struct file *file, void *fh,
++			       struct v4l2_dv_timings *timings)
++{
++	struct rkisp1_stream *stream = video_drvdata(file);
++	struct v4l2_subdev *sd = rkisp1_get_sensor_sd(stream->ispdev);
++
++	if (!sd)
++		return -ENODEV;
++	return v4l2_subdev_call(sd, pad, g_dv_timings, 0, timings);
++}
++
++static int rkisp1_query_dv_timings(struct file *file, void *fh,
++				   struct v4l2_dv_timings *timings)
++{
++	struct rkisp1_stream *stream = video_drvdata(file);
++	struct v4l2_subdev *sd = rkisp1_get_sensor_sd(stream->ispdev);
++
++	if (!sd)
++		return -ENODEV;
++	return v4l2_subdev_call(sd, pad, query_dv_timings, 0, timings);
++}
++
++static int rkisp1_s_dv_timings(struct file *file, void *fh,
++			       struct v4l2_dv_timings *timings)
++{
++	struct rkisp1_stream *stream = video_drvdata(file);
++	struct rkisp1_device *dev = stream->ispdev;
++	struct v4l2_subdev *sd = rkisp1_get_sensor_sd(dev);
++	int ret;
++
++	if (!sd)
++		return -ENODEV;
++	if (vb2_is_busy(&stream->vnode.buf_queue))
++		return -EBUSY;
++
++	ret = v4l2_subdev_call(sd, pad, s_dv_timings, 0, timings);
++	if (ret)
++		return ret;
++
++	/*
++	 * The bridge has a new frame size now; pull it through the ISP so the
++	 * next S_FMT/STREAMON sees a pipeline that matches the source.
++	 */
++	ret = rkisp1_update_sensor_info(dev);
++	if (ret < 0)
++		return ret;
++	return rkisp1_set_pipeline_default_fmt(dev);
++}
++
++static int rkisp1_enum_dv_timings(struct file *file, void *fh,
++				  struct v4l2_enum_dv_timings *timings)
++{
++	struct rkisp1_stream *stream = video_drvdata(file);
++	struct v4l2_subdev *sd = rkisp1_get_sensor_sd(stream->ispdev);
++	int ret;
++
++	if (!sd)
++		return -ENODEV;
++	/* the subdev op indexes its own pads; the video node has none */
++	timings->pad = 0;
++	ret = v4l2_subdev_call(sd, pad, enum_dv_timings, timings);
++	timings->pad = 0;
++	return ret;
++}
++
++static int rkisp1_dv_timings_cap(struct file *file, void *fh,
++				 struct v4l2_dv_timings_cap *cap)
++{
++	struct rkisp1_stream *stream = video_drvdata(file);
++	struct v4l2_subdev *sd = rkisp1_get_sensor_sd(stream->ispdev);
++	int ret;
++
++	if (!sd)
++		return -ENODEV;
++	cap->pad = 0;
++	ret = v4l2_subdev_call(sd, pad, dv_timings_cap, cap);
++	cap->pad = 0;
++	return ret;
++}
++
++/*
++ * ustreamer subscribes to V4L2_EVENT_SOURCE_CHANGE and re-opens the pipeline
++ * when it fires, which is how the stream follows a target that changes video
++ * mode. The bridge already raises the event - tc35874x calls
++ * v4l2_subdev_notify_event() - but it only reached its own subdev node until
++ * rkisp1_subdev_notify() in dev.c started relaying it here.
++ */
++static int rkisp1_subscribe_event(struct v4l2_fh *fh,
++				  const struct v4l2_event_subscription *sub)
++{
++	if (sub->type == V4L2_EVENT_SOURCE_CHANGE)
++		return v4l2_src_change_event_subscribe(fh, sub);
++	return v4l2_ctrl_subscribe_event(fh, sub);
++}
++
+ static const struct v4l2_ioctl_ops rkisp1_v4l2_ioctl_ops = {
+ 	.vidioc_reqbufs = vb2_ioctl_reqbufs,
+ 	.vidioc_querybuf = vb2_ioctl_querybuf,
+@@ -2082,6 +2276,13 @@ static const struct v4l2_ioctl_ops rkisp1_v4l2_ioctl_ops = {
+ 	.vidioc_querycap = rkisp1_querycap,
+ 	.vidioc_enum_frameintervals = rkisp_enum_frameintervals,
+ 	.vidioc_enum_framesizes = rkisp_enum_framesizes,
++	.vidioc_g_dv_timings = rkisp1_g_dv_timings,
++	.vidioc_s_dv_timings = rkisp1_s_dv_timings,
++	.vidioc_query_dv_timings = rkisp1_query_dv_timings,
++	.vidioc_enum_dv_timings = rkisp1_enum_dv_timings,
++	.vidioc_dv_timings_cap = rkisp1_dv_timings_cap,
++	.vidioc_subscribe_event = rkisp1_subscribe_event,
++	.vidioc_unsubscribe_event = v4l2_event_unsubscribe,
+ };
+ 
+ static void rkisp1_unregister_stream_vdev(struct rkisp1_stream *stream)
+diff --git a/drivers/media/platform/rockchip/isp1/dev.c b/drivers/media/platform/rockchip/isp1/dev.c
+index 4db629600..e2a8b9ecb 100644
+--- a/drivers/media/platform/rockchip/isp1/dev.c
++++ b/drivers/media/platform/rockchip/isp1/dev.c
+@@ -44,6 +44,7 @@
+ #include <linux/pm_runtime.h>
+ #include <linux/pinctrl/consumer.h>
+ #include <linux/regmap.h>
++#include <media/v4l2-event.h>
+ #include <media/videobuf2-dma-contig.h>
+ #include <soc/rockchip/rockchip-system-status.h>
+ #include "regs.h"
+@@ -372,7 +373,7 @@ static int rkisp1_create_links(struct rkisp1_device *dev)
+ 					sink, 0, flags);
+ }
+ 
+-static int _set_pipeline_default_fmt(struct rkisp1_device *dev)
++int rkisp1_set_pipeline_default_fmt(struct rkisp1_device *dev)
+ {
+ 	struct v4l2_subdev *isp;
+ 	struct v4l2_subdev_format fmt;
+@@ -472,7 +473,7 @@ static int subdev_notifier_complete(struct v4l2_async_notifier *notifier)
+ 		goto unlock;
+ 	}
+ 
+-	ret = _set_pipeline_default_fmt(dev);
++	ret = rkisp1_set_pipeline_default_fmt(dev);
+ 	if (ret < 0)
+ 		goto unlock;
+ 
+@@ -969,6 +970,33 @@ static const struct media_device_ops rkisp1_media_ops = {
+ 	.link_notify = v4l2_pipeline_link_notify,
+ };
+ 
++/*
++ * Relay subdev events to the capture video nodes.
++ *
++ * v4l2_subdev_notify_event() queues the event on the subdev's own node and
++ * then calls this. Without it, V4L2_EVENT_SOURCE_CHANGE from the HDMI bridge
++ * only ever reached /dev/v4l-subdev2, and a client watching /dev/video0 - which
++ * is the only node ustreamer opens - never learned that the source had changed
++ * resolution.
++ */
++static void rkisp1_subdev_notify(struct v4l2_subdev *sd, unsigned int notification,
++				 void *arg)
++{
++	struct rkisp1_device *dev =
++		container_of(sd->v4l2_dev, struct rkisp1_device, v4l2_dev);
++	unsigned int i;
++
++	if (notification != V4L2_DEVICE_NOTIFY_EVENT)
++		return;
++
++	for (i = 0; i < RKISP1_MAX_STREAM; i++) {
++		struct video_device *vdev = &dev->stream[i].vnode.vdev;
++
++		if (video_is_registered(vdev))
++			v4l2_event_queue(vdev, arg);
++	}
++}
++
+ static int rkisp1_plat_probe(struct platform_device *pdev)
+ {
+ 	const struct of_device_id *match;
+@@ -1071,6 +1099,8 @@ static int rkisp1_plat_probe(struct platform_device *pdev)
+ 	v4l2_ctrl_handler_init(&isp_dev->ctrl_handler, 5);
+ 	v4l2_dev->ctrl_handler = &isp_dev->ctrl_handler;
+ 
++	v4l2_dev->notify = rkisp1_subdev_notify;
++
+ 	ret = v4l2_device_register(isp_dev->dev, &isp_dev->v4l2_dev);
+ 	if (ret < 0) {
+ 		v4l2_err(v4l2_dev, "Failed to register v4l2 device: %d\n",
+diff --git a/drivers/media/platform/rockchip/isp1/dev.h b/drivers/media/platform/rockchip/isp1/dev.h
+index f646aa9b2..1b0669c4b 100644
+--- a/drivers/media/platform/rockchip/isp1/dev.h
++++ b/drivers/media/platform/rockchip/isp1/dev.h
+@@ -170,4 +173,6 @@ struct rkisp1_device {
+ 	wait_queue_head_t sync_onoff;
+ };
+ 
++int rkisp1_set_pipeline_default_fmt(struct rkisp1_device *dev);
++
+ #endif

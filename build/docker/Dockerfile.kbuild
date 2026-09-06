@@ -1,0 +1,27 @@
+# Cross-build environment for the RK3399 kernel and U-Boot.
+#
+# Ubuntu 20.04 on purpose: the vendor 4.4 tree still wants python2 for some of
+# Rockchip's resource/image tools, and 20.04 is the newest release that still
+# ships it. It is also new enough to host a modern cross-gcc for the mainline
+# track, so one image covers both.
+FROM ubuntu:20.04
+
+ENV DEBIAN_FRONTEND=noninteractive
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        build-essential \
+        bc bison flex \
+        libssl-dev libncurses-dev libelf-dev \
+        device-tree-compiler u-boot-tools \
+        gcc-aarch64-linux-gnu g++-aarch64-linux-gnu \
+        git rsync kmod cpio file xz-utils lzop lz4 liblz4-tool \
+        python2 python3 python3-pyelftools python-is-python3 \
+        ca-certificates make swig \
+        parted gdisk e2fsprogs dosfstools \
+    && rm -rf /var/lib/apt/lists/*
+
+# The vendor Linaro 6.3 toolchain is bind-mounted at /toolchain by the build
+# scripts (it lives in sources/toolchain, cloned from orangepi-xunlong).
+ENV PATH="/toolchain/gcc-linaro-6.3.1-2017.05-x86_64_aarch64-linux-gnu/bin:${PATH}"
+
+WORKDIR /work

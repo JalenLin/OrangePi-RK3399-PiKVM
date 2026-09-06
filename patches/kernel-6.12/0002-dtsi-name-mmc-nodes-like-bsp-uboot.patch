@@ -1,0 +1,47 @@
+diff --git a/arch/arm64/boot/dts/rockchip/rk3399.dtsi b/arch/arm64/boot/dts/rockchip/rk3399.dtsi
+index 12c9011c5..d5bcc118d 100644
+--- a/arch/arm64/boot/dts/rockchip/rk3399.dtsi
++++ b/arch/arm64/boot/dts/rockchip/rk3399.dtsi
+@@ -317,7 +317,23 @@ gmac: ethernet@fe300000 {
+ 		status = "disabled";
+ 	};
+ 
+-	sdio0: mmc@fe310000 {
++	/*
++	 * Named dwmmc@/sdhci@ rather than mainline's mmc@ to match the node
++	 * names in the BSP U-Boot's own device tree.
++	 *
++	 * U-Boot's init_kernel_dtb() calls dm_scan_fdt() on this tree while
++	 * the devices it bound from its own tree are still live. Matching
++	 * names let it recognise them as the same hardware; differing names
++	 * make it bind a second device for the same controller, and the two
++	 * then fight over the MMC sequence number:
++	 *
++	 *   Device 'mmc@fe320000': seq 1 is in use by 'dwmmc@fe320000'
++	 *   Could not get mmc 1
++	 *
++	 * at which point U-Boot cannot read the card it is booting from.
++	 * Linux does not care: it binds on compatible, not on node name.
++	 */
++	sdio0: dwmmc@fe310000 {
+ 		compatible = "rockchip,rk3399-dw-mshc",
+ 			     "rockchip,rk3288-dw-mshc";
+ 		reg = <0x0 0xfe310000 0x0 0x4000>;
+@@ -333,7 +349,7 @@ sdio0: mmc@fe310000 {
+ 		status = "disabled";
+ 	};
+ 
+-	sdmmc: mmc@fe320000 {
++	sdmmc: dwmmc@fe320000 {
+ 		compatible = "rockchip,rk3399-dw-mshc",
+ 			     "rockchip,rk3288-dw-mshc";
+ 		reg = <0x0 0xfe320000 0x0 0x4000>;
+@@ -351,7 +367,7 @@ sdmmc: mmc@fe320000 {
+ 		status = "disabled";
+ 	};
+ 
+-	sdhci: mmc@fe330000 {
++	sdhci: sdhci@fe330000 {
+ 		compatible = "rockchip,rk3399-sdhci-5.1", "arasan,sdhci-5.1";
+ 		reg = <0x0 0xfe330000 0x0 0x10000>;
+ 		interrupts = <GIC_SPI 11 IRQ_TYPE_LEVEL_HIGH 0>;

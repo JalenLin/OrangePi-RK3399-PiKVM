@@ -1,0 +1,149 @@
+diff --git a/drivers/usb/gadget/function/f_mass_storage.c b/drivers/usb/gadget/function/f_mass_storage.c
+index 08e0d1c51..62a5aa050 100644
+--- a/drivers/usb/gadget/function/f_mass_storage.c
++++ b/drivers/usb/gadget/function/f_mass_storage.c
+@@ -1071,7 +1071,17 @@ static int do_inquiry(struct fsg_common *common, struct fsg_buffhd *bh)
+ 	buf[5] = 0;		/* No special options */
+ 	buf[6] = 0;
+ 	buf[7] = 0;
+-	if (curlun->inquiry_string[0])
++	/*
++	 * A LUN that is switched to CD-ROM mode should be able to report a
++	 * different vendor/product string from the same LUN in flash mode -
++	 * some BIOSes will only boot from a device that looks like a real
++	 * optical drive. kvmd writes both (lun.0/inquiry_string_cdrom and
++	 * lun.0/inquiry_string) and flips ->cdrom per image.
++	 */
++	if (curlun->cdrom && curlun->inquiry_string_cdrom[0])
++		memcpy(buf + 8, curlun->inquiry_string_cdrom,
++		       sizeof(curlun->inquiry_string_cdrom));
++	else if (curlun->inquiry_string[0])
+ 		memcpy(buf + 8, curlun->inquiry_string,
+ 		       sizeof(curlun->inquiry_string));
+ 	else
+@@ -3250,6 +3260,20 @@ static ssize_t fsg_lun_opts_inquiry_string_store(struct config_item *item,
+ 
+ CONFIGFS_ATTR(fsg_lun_opts_, inquiry_string);
+ 
++static ssize_t fsg_lun_opts_inquiry_string_cdrom_show(struct config_item *item,
++						      char *page)
++{
++	return fsg_show_inquiry_string_cdrom(to_fsg_lun_opts(item)->lun, page);
++}
++
++static ssize_t fsg_lun_opts_inquiry_string_cdrom_store(struct config_item *item,
++						       const char *page, size_t len)
++{
++	return fsg_store_inquiry_string_cdrom(to_fsg_lun_opts(item)->lun, page, len);
++}
++
++CONFIGFS_ATTR(fsg_lun_opts_, inquiry_string_cdrom);
++
+ static ssize_t fsg_lun_opts_forced_eject_store(struct config_item *item,
+ 					       const char *page, size_t len)
+ {
+@@ -3269,6 +3293,7 @@ static struct configfs_attribute *fsg_lun_attrs[] = {
+ 	&fsg_lun_opts_attr_cdrom,
+ 	&fsg_lun_opts_attr_nofua,
+ 	&fsg_lun_opts_attr_inquiry_string,
++	&fsg_lun_opts_attr_inquiry_string_cdrom,
+ 	&fsg_lun_opts_attr_forced_eject,
+ 	NULL,
+ };
+diff --git a/drivers/usb/gadget/function/storage_common.c b/drivers/usb/gadget/function/storage_common.c
+index 75831f2c7..577b56ed5 100644
+--- a/drivers/usb/gadget/function/storage_common.c
++++ b/drivers/usb/gadget/function/storage_common.c
+@@ -374,6 +374,12 @@ ssize_t fsg_show_inquiry_string(struct fsg_lun *curlun, char *buf)
+ }
+ EXPORT_SYMBOL_GPL(fsg_show_inquiry_string);
+ 
++ssize_t fsg_show_inquiry_string_cdrom(struct fsg_lun *curlun, char *buf)
++{
++	return sprintf(buf, "%s\n", curlun->inquiry_string_cdrom);
++}
++EXPORT_SYMBOL_GPL(fsg_show_inquiry_string_cdrom);
++
+ /*
+  * The caller must hold fsg->filesem for reading when calling this function.
+  */
+@@ -504,24 +510,40 @@ ssize_t fsg_store_removable(struct fsg_lun *curlun, const char *buf,
+ }
+ EXPORT_SYMBOL_GPL(fsg_store_removable);
+ 
+-ssize_t fsg_store_inquiry_string(struct fsg_lun *curlun, const char *buf,
+-				 size_t count)
++static ssize_t fsg_store_inquiry_str(char *dest, size_t size,
++				     const char *buf, size_t count)
+ {
+-	const size_t len = min(count, sizeof(curlun->inquiry_string));
++	const size_t len = min(count, size);
+ 
+ 	if (len == 0 || buf[0] == '\n') {
+-		curlun->inquiry_string[0] = 0;
++		dest[0] = 0;
+ 	} else {
+-		snprintf(curlun->inquiry_string,
+-			 sizeof(curlun->inquiry_string), "%-28s", buf);
+-		if (curlun->inquiry_string[len-1] == '\n')
+-			curlun->inquiry_string[len-1] = ' ';
++		snprintf(dest, size, "%-28s", buf);
++		if (dest[len-1] == '\n')
++			dest[len-1] = ' ';
+ 	}
+ 
+ 	return count;
+ }
++
++ssize_t fsg_store_inquiry_string(struct fsg_lun *curlun, const char *buf,
++				 size_t count)
++{
++	return fsg_store_inquiry_str(curlun->inquiry_string,
++				     sizeof(curlun->inquiry_string),
++				     buf, count);
++}
+ EXPORT_SYMBOL_GPL(fsg_store_inquiry_string);
+ 
++ssize_t fsg_store_inquiry_string_cdrom(struct fsg_lun *curlun, const char *buf,
++				       size_t count)
++{
++	return fsg_store_inquiry_str(curlun->inquiry_string_cdrom,
++				     sizeof(curlun->inquiry_string_cdrom),
++				     buf, count);
++}
++EXPORT_SYMBOL_GPL(fsg_store_inquiry_string_cdrom);
++
+ ssize_t fsg_store_forced_eject(struct fsg_lun *curlun, struct rw_semaphore *filesem,
+ 			       const char *buf, size_t count)
+ {
+diff --git a/drivers/usb/gadget/function/storage_common.h b/drivers/usb/gadget/function/storage_common.h
+index ced5d2b09..52f4323b7 100644
+--- a/drivers/usb/gadget/function/storage_common.h
++++ b/drivers/usb/gadget/function/storage_common.h
+@@ -120,6 +120,9 @@ struct fsg_lun {
+ 	const char	*name;		/* "lun.name" */
+ 	const char	**name_pfx;	/* "function.name" */
+ 	char		inquiry_string[INQUIRY_STRING_LEN];
++	/* Reported instead of inquiry_string while the LUN is in CD-ROM
++	 * mode; see fsg_store_inquiry_string_cdrom(). */
++	char		inquiry_string_cdrom[INQUIRY_STRING_LEN];
+ };
+ 
+ static inline bool fsg_lun_is_open(struct fsg_lun *curlun)
+@@ -206,6 +209,7 @@ ssize_t fsg_show_nofua(struct fsg_lun *curlun, char *buf);
+ ssize_t fsg_show_file(struct fsg_lun *curlun, struct rw_semaphore *filesem,
+ 		      char *buf);
+ ssize_t fsg_show_inquiry_string(struct fsg_lun *curlun, char *buf);
++ssize_t fsg_show_inquiry_string_cdrom(struct fsg_lun *curlun, char *buf);
+ ssize_t fsg_show_cdrom(struct fsg_lun *curlun, char *buf);
+ ssize_t fsg_show_removable(struct fsg_lun *curlun, char *buf);
+ ssize_t fsg_store_ro(struct fsg_lun *curlun, struct rw_semaphore *filesem,
+@@ -219,6 +223,8 @@ ssize_t fsg_store_removable(struct fsg_lun *curlun, const char *buf,
+ 			    size_t count);
+ ssize_t fsg_store_inquiry_string(struct fsg_lun *curlun, const char *buf,
+ 				 size_t count);
++ssize_t fsg_store_inquiry_string_cdrom(struct fsg_lun *curlun, const char *buf,
++				       size_t count);
+ ssize_t fsg_store_forced_eject(struct fsg_lun *curlun, struct rw_semaphore *filesem,
+ 			       const char *buf, size_t count);
+ 

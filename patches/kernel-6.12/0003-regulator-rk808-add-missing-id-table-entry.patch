@@ -1,0 +1,33 @@
+diff --git a/drivers/regulator/rk808-regulator.c b/drivers/regulator/rk808-regulator.c
+index 3ccd3ab92..7afebd583 100644
+--- a/drivers/regulator/rk808-regulator.c
++++ b/drivers/regulator/rk808-regulator.c
+@@ -1776,6 +1776,28 @@ static int rk808_regulator_probe(struct platform_device *pdev)
+ 
+ static const struct platform_device_id rk8xx_regulator_id_table[] = {
+ 	{ "rk805-regulator", 0 },
++	/*
++	 * rk808-regulator was missing here, and its absence silently disabled
++	 * every regulator on an RK808.
++	 *
++	 * Both MFD front-ends (rk808.c and rk8xx-core.c) register the cell
++	 * under this name, and this driver's .driver.name matches it - but
++	 * platform_match() never gets that far:
++	 *
++	 *	if (pdrv->id_table)
++	 *		return platform_match_id(pdrv->id_table, pdev) != NULL;
++	 *	/​* fall-back to driver name match *​/
++	 *
++	 * An id_table shadows the name match entirely, so the device simply
++	 * never bound. Nothing failed loudly; the regulators just did not
++	 * exist, and everything downstream deferred forever:
++	 *
++	 *   fe320000.dwmmc: vqmmc regulator not available
++	 *   fe300000.ethernet: failed to get phy regulator
++	 *   vcc1v8-s3: Failed to register regulator: -517
++	 *   display-subsystem / rockchip-cpufreq: deferred probe pending
++	 */
++	{ "rk808-regulator", 0 },
+ 	{ "rk809-regulator", 0 },
+ 	{ "rk816-regulator", 0 },
+ 	{ "rk817-regulator", 0 },

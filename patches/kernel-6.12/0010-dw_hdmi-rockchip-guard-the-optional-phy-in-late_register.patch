@@ -1,0 +1,37 @@
+diff --git a/drivers/gpu/drm/rockchip/dw_hdmi-rockchip.c b/drivers/gpu/drm/rockchip/dw_hdmi-rockchip.c
+index a943aacce..44bdeec98 100644
+--- a/drivers/gpu/drm/rockchip/dw_hdmi-rockchip.c
++++ b/drivers/gpu/drm/rockchip/dw_hdmi-rockchip.c
+@@ -2073,9 +2073,30 @@ static int dw_hdmi_encoder_late_register(struct drm_encoder *encoder)
+ 	 * framework during probe so that the HDMI controller can pass its
+ 	 * HDMI debugfs directory (/sys/kernel/debug/dri/0/hdmiX/) to the
+ 	 * PHY driver via phy->debugfs.
++	 *
++	 * hdmi->phy is optional - it comes from devm_phy_optional_get() and is
++	 * NULL on SoCs whose HDMI PHY lives inside the controller rather than
++	 * being a separate device. RK3399 is one of those, and this was the one
++	 * site out of five that dereferenced it unguarded, so bringing up HDMI
++	 * output oopsed the moment the encoder was registered:
++	 *
++	 *   Unable to handle kernel NULL pointer dereference at 0x340
++	 *   pc : dw_hdmi_encoder_late_register+0x20/0x68
++	 *   lr : drm_encoder_register_all+0x5c/0x88
++	 *
++	 * (0x340 is offsetof(struct phy, debugfs).) The other four uses of
++	 * hdmi->phy in this file all test it first.
++	 *
++	 * With no separate PHY there is nothing to hand the directory to, but
++	 * the controller still wants its own debugfs node, so register it and
++	 * drop the dentry.
+ 	 */
+-	if (!hdmi->phy->debugfs)
+-		hdmi->phy->debugfs = dw_hdmi_register_debugfs(hdmi->hdmi);
++	if (hdmi->phy) {
++		if (!hdmi->phy->debugfs)
++			hdmi->phy->debugfs = dw_hdmi_register_debugfs(hdmi->hdmi);
++	} else {
++		dw_hdmi_register_debugfs(hdmi->hdmi);
++	}
+ 	dw_hdmi_phy_init(hdmi->hdmi);
+ 
+ 	return 0;

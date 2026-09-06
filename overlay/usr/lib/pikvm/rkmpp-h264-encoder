@@ -1,0 +1,6 @@
+enc
+type=enc
+codecs=H.264
+max-width=1920
+max-height=1080
+log-level=0

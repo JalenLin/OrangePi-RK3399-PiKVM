@@ -1,0 +1,66 @@
+diff --git a/drivers/gpu/drm/bridge/synopsys/dw-hdmi.c b/drivers/gpu/drm/bridge/synopsys/dw-hdmi.c
+index 6af19f05d..e6a3ceec2 100644
+--- a/drivers/gpu/drm/bridge/synopsys/dw-hdmi.c
++++ b/drivers/gpu/drm/bridge/synopsys/dw-hdmi.c
+@@ -5110,6 +5110,27 @@ static void dw_hdmi_register_hdcp(struct device *dev, struct dw_hdmi *hdmi, u32
+ 		hdmi->hdcp = hdmi->hdcp_dev->dev.platform_data;
+ }
+ 
++/*
++ * Read the optional "force-output" property out of Rockchip's vendor-only
++ * display-subsystem/route/route-hdmi nodes.
++ *
++ * Those nodes are a BSP extension - they exist to hand the U-Boot splash over
++ * to the kernel and to pin a connector to a VOP. A mainline-derived board dts
++ * does not have them, and it should not have to: all this function does is
++ * read one boolean.
++ *
++ * It used to return -ENODEV when any of the three nodes was missing, and the
++ * caller treats that as a probe failure, so on this board HDMI output could
++ * never come up at all:
++ *
++ *   dwhdmi-rockchip ff940000.hdmi: can't find route
++ *   rockchip-drm display-subsystem: failed to bind ff940000.hdmi: -19
++ *   rockchip-drm display-subsystem: adev bind failed: -19
++ *
++ * with no /dev/dri, no framebuffer and a black screen. Absent nodes now simply
++ * mean "no forced logo", which is the same answer as an explicitly disabled
++ * route-hdmi already gave.
++ */
+ static int get_force_logo_property(struct dw_hdmi *hdmi)
+ {
+ 	struct device_node *dss;
+@@ -5118,25 +5139,23 @@ static int get_force_logo_property(struct dw_hdmi *hdmi)
+ 
+ 	dss = of_find_node_by_name(NULL, "display-subsystem");
+ 	if (!dss) {
+-		dev_err(hdmi->dev, "can't find display-subsystem\n");
+-		return -ENODEV;
++		dev_dbg(hdmi->dev, "no display-subsystem node, no forced logo\n");
++		return 0;
+ 	}
+ 
+ 	route = of_find_node_by_name(dss, "route");
++	of_node_put(dss);
+ 	if (!route) {
+-		dev_err(hdmi->dev, "can't find route\n");
+-		of_node_put(dss);
+-		return -ENODEV;
++		dev_dbg(hdmi->dev, "no route node, no forced logo\n");
++		return 0;
+ 	}
+-	of_node_put(dss);
+ 
+ 	route_hdmi = of_find_node_by_name(route, "route-hdmi");
++	of_node_put(route);
+ 	if (!route_hdmi) {
+-		dev_err(hdmi->dev, "can't find route-hdmi\n");
+-		of_node_put(route);
+-		return -ENODEV;
++		dev_dbg(hdmi->dev, "no route-hdmi node, no forced logo\n");
++		return 0;
+ 	}
+-	of_node_put(route);
+ 
+ 	if (!of_device_is_available(route_hdmi)) {
+ 		dev_dbg(hdmi->dev, "route-hdmi is disabled\n");

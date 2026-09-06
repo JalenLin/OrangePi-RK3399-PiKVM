@@ -1,0 +1,22 @@
+#!/bin/sh
+# Stand-in for the Raspberry Pi firmware tool.
+#
+# kvmd's health module polls `vcgencmd get_throttled` every info.hw.state_poll
+# seconds (5 by default) to report undervoltage and thermal throttling. There
+# is no VideoCore on an RK3399, so the real binary - which the ALARM image
+# ships anyway - fails with "Can't open device file: /dev/vcio_gencmd", and
+# kvmd logs an ERROR for every single poll. That is roughly 17k lines a day in
+# the journal, on a board whose rootfs is a card.
+#
+# kvmd has no way to turn the probe off: both the "command failed" and the
+# "output did not parse" paths log before returning None. So answer it.
+#
+# 0x0 means "no undervoltage, not frequency-capped, not throttled". That is a
+# claim this SoC cannot actually make - RK3399 does throttle, via its own
+# thermal zones under /sys/class/thermal, which kvmd would not understand. Read
+# it as "no Raspberry Pi-style power/thermal reporting here", not as a health
+# guarantee.
+case "$1" in
+	get_throttled) echo "throttled=0x0" ;;
+	*)             exit 0 ;;
+esac

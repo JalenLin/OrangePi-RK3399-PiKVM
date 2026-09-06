@@ -1,0 +1,41 @@
+diff --git a/drivers/media/platform/rockchip/isp1/capture.c b/drivers/media/platform/rockchip/isp1/capture.c
+index 894e30e2f..8d15f01bf 100644
+--- a/drivers/media/platform/rockchip/isp1/capture.c
++++ b/drivers/media/platform/rockchip/isp1/capture.c
+@@ -1711,6 +1711,36 @@ static int rkisp1_set_fmt(struct rkisp1_stream *stream,
+ 	if (!try) {
+ 		stream->out_isp_fmt = *fmt;
+ 		stream->out_fmt = *pixm;
++		/*
++		 * Re-anchor the dual-crop rectangle to the current ISP input
++		 * window.
++		 *
++		 * stream->dcrop is only ever written by VIDIOC_S_SELECTION and
++		 * by rkisp1_set_pipeline_default_fmt(), which seeds it from
++		 * whatever the sensor reported *then*, clamped to
++		 * CIF_ISP_INPUT_{W,H}_MIN. An HDMI bridge has no
++		 * format until a source is plugged in and its timings are
++		 * detected, so on this board that seed is the clamp itself -
++		 * 32x16 - and nothing later moves it. VIDIOC_S_FMT does not,
++		 * which is both the bug and a spec violation: S_FMT is defined
++		 * to reset the selection rectangles to their defaults.
++		 *
++		 * The failure is silent. Capture "works" - buffers are dequeued
++		 * at the correct frame rate - but the ISP is told to crop to
++		 * 32x16 and then upscale ~40x back to the requested size, far
++		 * outside what the resizer can do, so every frame comes back
++		 * solid black:
++		 *
++		 *   rkisp1: stream 0 crop: 1280x720 -> 32x16
++		 *   rkisp1: stream 0 rsz/scale: 32x16 -> 1280x720
++		 *
++		 * Resetting here restores the documented S_FMT semantics and
++		 * makes the default pipeline full-frame, as it already is for a
++		 * sensor that reports a real size at probe time.
++		 */
++		stream->dcrop = *rkisp1_get_isp_sd_win(&stream->ispdev->isp_sdev);
++		stream->dcrop.left = 0;
++		stream->dcrop.top = 0;
+ 
+ 		if (stream->id == RKISP1_STREAM_SP) {
+ 			stream->u.sp.y_stride =

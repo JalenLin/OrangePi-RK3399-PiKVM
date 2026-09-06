@@ -1,0 +1,28 @@
+# Wi-Fi, if you configure it. Inert until something associates: systemd-networkd
+# will not run DHCP on a wireless interface that has no carrier, so this file
+# costs nothing on a board that only ever uses ethernet.
+#
+# The chip is an AP6356S (BCM4356 on SDIO) driven by mainline brcmfmac; see
+# config/kernel-fragments/pikvm.config for why it is not the vendor bcmdhd,
+# and patches/kernel-6.12/0001 for the NVRAM naming. Association itself is
+# wpa_supplicant's job and needs credentials we cannot ship - see
+# /etc/wpa_supplicant/README.
+#
+# RouteMetric is the part worth reading. Both interfaces can be up at once,
+# and for a KVM that is not a tie you want broken by chance: the wired link is
+# the one that stays up while the target reboots, and the one that does not
+# drop when someone microwaves lunch. 1024 against the wired default of 1024
+# would be exactly that tie, so this sits well below it in preference (higher
+# metric = less preferred) while still working perfectly well on its own.
+[Match]
+Name=wlan*
+
+[Network]
+DHCP=yes
+DNSSEC=no
+
+[DHCPv4]
+RouteMetric=2048
+
+[IPv6AcceptRA]
+RouteMetric=2048

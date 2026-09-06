@@ -1,0 +1,64 @@
+diff --git a/drivers/media/platform/rockchip/isp1/capture.c b/drivers/media/platform/rockchip/isp1/capture.c
+index 98bd48f2c..5df5688b0 100644
+--- a/drivers/media/platform/rockchip/isp1/capture.c
++++ b/drivers/media/platform/rockchip/isp1/capture.c
+@@ -2242,6 +2242,50 @@
+ }
+ 
+ /*
++ * EDID lives on the bridge too, and for the same reason as the DV timings:
++ * on a Pi the tc358743 *is* the capture device, so everything upstream -
++ * kvmd-tc358743.service, kvmd-edidconf --apply - points VIDIOC_S_EDID at
++ * /dev/kvmd-video and expects it to land on the HDMI receiver. Here that node
++ * is this driver's mainpath and the receiver is two hops further up the
++ * graph, so without this the ioctl comes back ENOTTY and nothing kvmd does to
++ * the EDID has any effect on what the source actually sees.
++ *
++ * struct v4l2_subdev_edid is a #define for struct v4l2_edid and ->edid is a
++ * user pointer on both sides, so the call is a straight hand-off.
++ */
++static int rkisp1_g_edid(struct file *file, void *fh, struct v4l2_edid *edid)
++{
++	struct rkisp1_stream *stream = video_drvdata(file);
++	struct v4l2_subdev *sd = rkisp1_get_sensor_sd(stream->ispdev);
++	int ret;
++
++	if (!sd)
++		return -ENODEV;
++	/* the subdev op indexes its own pads; the video node has none */
++	edid->pad = 0;
++	ret = v4l2_subdev_call(sd, pad, get_edid, edid);
++	edid->pad = 0;
++	return ret;
++}
++
++static int rkisp1_s_edid(struct file *file, void *fh, struct v4l2_edid *edid)
++{
++	struct rkisp1_stream *stream = video_drvdata(file);
++	struct v4l2_subdev *sd = rkisp1_get_sensor_sd(stream->ispdev);
++	int ret;
++
++	if (!sd)
++		return -ENODEV;
++	if (vb2_is_busy(&stream->vnode.buf_queue))
++		return -EBUSY;
++
++	edid->pad = 0;
++	ret = v4l2_subdev_call(sd, pad, set_edid, edid);
++	edid->pad = 0;
++	return ret;
++}
++
++/*
+  * ustreamer subscribes to V4L2_EVENT_SOURCE_CHANGE and re-opens the pipeline
+  * when it fires, which is how the stream follows a target that changes video
+  * mode. The bridge already raises the event - tc35874x calls
+@@ -2281,6 +2325,8 @@
+ 	.vidioc_query_dv_timings = rkisp1_query_dv_timings,
+ 	.vidioc_enum_dv_timings = rkisp1_enum_dv_timings,
+ 	.vidioc_dv_timings_cap = rkisp1_dv_timings_cap,
++	.vidioc_g_edid = rkisp1_g_edid,
++	.vidioc_s_edid = rkisp1_s_edid,
+ 	.vidioc_subscribe_event = rkisp1_subscribe_event,
+ 	.vidioc_unsubscribe_event = v4l2_event_unsubscribe,
+ };

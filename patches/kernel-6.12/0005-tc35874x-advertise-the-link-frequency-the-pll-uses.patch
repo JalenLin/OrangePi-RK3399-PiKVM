@@ -1,0 +1,73 @@
+diff --git a/drivers/media/i2c/tc35874x.c b/drivers/media/i2c/tc35874x.c
+index 43ec355e4..9b80e9e6c 100644
+--- a/drivers/media/i2c/tc35874x.c
++++ b/drivers/media/i2c/tc35874x.c
+@@ -74,13 +74,36 @@ MODULE_LICENSE("GPL");
+ #define POLL_INTERVAL_MS	1000
+ 
+ /* PIXEL_RATE = MIPI_FREQ * 2 * lane / 8bit */
+-#define TC35874X_LINK_FREQ_310MHZ	310000000
+-#define TC35874X_PIXEL_RATE_310M	TC35874X_LINK_FREQ_310MHZ
++/*
++ * This must be the rate the CSI PLL is actually programmed to, because it is
++ * the only thing the receiver ever sees: the Rockchip MIPI D-PHY reads
++ * V4L2_CID_LINK_FREQ, doubles it, and uses the result to pick an hsfreqrange
++ * bucket for its HS receiver.
++ *
++ * tc35874x_set_pll() runs the 4-lane progressive case at prd 5, fbd 138, so
++ * with the board's 27 MHz refclk the link is 27 / 5 * 138 = 745.2 Mbps per
++ * lane, i.e. a 372.6 MHz link frequency. The old value of 310 MHz claimed
++ * 620 Mbps and put the D-PHY in the 600-650 Mbps bucket while the transmitter
++ * ran 20% faster. Short packets still decoded, so frame start/end arrived at
++ * the right rate and capture looked alive, but the long packets carrying the
++ * pixels did not survive - every frame came back solid black with
++ * CIF_ISP_PIC_SIZE_ERROR (CIF_ISP_ERR_INFORM_SIZE) and CIF_ISP_DATA_LOSS.
++ *
++ * The 4.4 vendor kernel had neither the PLL override nor its matching D-PHY
++ * timing counters and ran at the 594 Mbps the REF_02 defaults were written
++ * for; the overrides arrived without this constant being updated with them.
++ *
++ * Still wrong for the interlaced / <=33 fps case, which set_pll() runs at
++ * prd 2, fbd 65 = 877.5 Mbps; that needs the menu to gain a second entry and
++ * set_pll() to select between them.
++ */
++#define TC35874X_LINK_FREQ_372MHZ	372600000
++#define TC35874X_PIXEL_RATE_372M	TC35874X_LINK_FREQ_372MHZ
+ 
+ #define TC35874X_NAME			"tc35874x"
+ 
+ static const s64 link_freq_menu_items[] = {
+-	TC35874X_LINK_FREQ_310MHZ,
++	TC35874X_LINK_FREQ_372MHZ,
+ };
+ 
+ static const struct v4l2_dv_timings_cap tc35874x_timings_cap = {
+@@ -1828,7 +1851,14 @@ static int tc35874x_set_fmt(struct v4l2_subdev *sd,
+-	__v4l2_ctrl_s_ctrl(state->link_freq,
+-		link_freq_menu_items[0]);
++	/*
++	 * 0, not link_freq_menu_items[0]: V4L2_CID_LINK_FREQ is an integer
++	 * menu, so the control's value is an index into it. Passing the
++	 * frequency itself only works while the menu has one entry - the core
++	 * clamps it to max, which is 0 - and turns into a silent wrong-entry
++	 * selection the moment a second one is added, which is exactly what
++	 * the interlaced case described above still needs.
++	 */
++	__v4l2_ctrl_s_ctrl(state->link_freq, 0);
+ 	__v4l2_ctrl_s_ctrl_int64(state->pixel_rate,
+-		TC35874X_PIXEL_RATE_310M);
++		TC35874X_PIXEL_RATE_372M);
+ 
+ 	tc35874x_set_pll(sd);
+ 	tc35874x_set_csi(sd);
+@@ -2344,8 +2367,8 @@ static int tc35874x_probe(struct i2c_client *client)
+ 		V4L2_CID_LINK_FREQ, 0, 0, link_freq_menu_items);
+ 
+ 	state->pixel_rate = v4l2_ctrl_new_std(&state->hdl, NULL,
+-		V4L2_CID_PIXEL_RATE, 0, TC35874X_PIXEL_RATE_310M, 1,
+-		TC35874X_PIXEL_RATE_310M);
++		V4L2_CID_PIXEL_RATE, 0, TC35874X_PIXEL_RATE_372M, 1,
++		TC35874X_PIXEL_RATE_372M);
+ 
+ 	state->detect_tx_5v_ctrl = v4l2_ctrl_new_std(&state->hdl,
+ 			NULL, V4L2_CID_DV_RX_POWER_PRESENT,

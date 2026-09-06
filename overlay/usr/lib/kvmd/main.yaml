@@ -1,0 +1,143 @@
+# Adapted from kvmd-platform-v2-hdmi-rpi4/usr/lib/kvmd/main.yaml.
+# Don't touch this file otherwise your device may stop working.
+# Use override.yaml to modify required settings.
+
+kvmd:
+    hid:
+        type: otg
+
+    atx:
+        # Disabled, because this board has no ATX wiring and cannot have a
+        # useful default one.
+        #
+        # ATX control is four wires to the target's front-panel header - two
+        # outputs that momentarily short the power and reset pins, two inputs
+        # that read the power and HDD LEDs - and all four have to go through
+        # optocouplers, because the two machines share no ground. None of that
+        # exists until someone builds it, and the pin numbers depend on how
+        # they build it.
+        #
+        # This used to say "gpio", which inherited kvmd's Raspberry Pi
+        # defaults: BCM 22/23/24/27 on /dev/kvmd-gpio, which resolved to
+        # gpiochip0. On RK3399 gpio0 is the small PMU bank - GPIO0_A0..A7 and
+        # GPIO0_B0..B5, fourteen lines - so lines 22, 23, 24 and 27 are not
+        # pins at all. The driver still hands them out, since pinctrl-rockchip
+        # declares every bank as 32, so nothing failed: the buttons in the web
+        # UI worked, wrote to register bits that leave the die nowhere, and
+        # reported success. A control that silently does nothing is worse than
+        # one that is greyed out.
+        #
+        # The pin assignment is settled, though - it is in
+        # /etc/kvmd/override.yaml, commented out and ready. Note that two of
+        # kvmd's four defaults cannot be used here: the 40-pin header is
+        # labelled like a Raspberry Pi's, but GPIO22 and GPIO27 are UART0 on
+        # this board and UART0 carries the Bluetooth module. See the ATX
+        # section of docs/hardware.md.
+        type: disabled
+
+    msd:
+        type: otg
+
+    streamer:
+        # kvmd's own defaults for both of these are 0, and 0 is not a value
+        # this encoder can use. A bitrate of 0 leaves MPP to guess one from
+        # the frame size; a GOP of 0 means "open-ended" in V4L2 and makes
+        # MPP's rate controller fail to initialise outright. Upstream
+        # overrides the bitrate per platform for the same reason. 5000 kbps
+        # is what upstream picks at 1080p; 30 is ustreamer's own default and
+        # one keyframe a second at the fps this streams.
+        #
+        # Measured caveat on the bitrate, because it will look broken
+        # otherwise: ustreamer hardcodes H264_MIN_QP=16 and H264_MAX_QP=32
+        # and does not expose either, and the plugin hands both to MPP as
+        # h264:qp_min / h264:qp_max. The rate controller can only chase a
+        # target by moving QP, so the setting is honoured exactly while the
+        # QP it needs falls inside that window and ignored outside it. On a
+        # typical screen QP 16 costs about 800 kbps, so raising this above
+        # roughly 1-2 Mbps buys nothing; lowering it works all the way down.
+        # Raising MIN_QP's floor, not this number, is what would buy quality.
+        # docs/capture.md has the sweep.
+        #
+        # 0 is a legal value on the UI slider and would kill MPP's rate
+        # controller ("gop_bits init fail gop_len 0"); the zero guard in
+        # patches/libv4l-rkmpp/0002 keeps the previous GOP instead. Verified.
+        h264_bitrate:
+            default: 5000
+        h264_gop:
+            default: 30
+        cmd:
+            - "/usr/lib/pikvm/ustreamer-encoder"
+            - "--device=/dev/kvmd-video"
+            - "--persistent"
+            - "--dv-timings"
+            # YUYV, not upstream's UYVY. On the Pi the capture node is
+            # the TC358743 itself and offers UYVY; here it is the
+            # rkisp1 main path, whose format list is YUYV/422P/NV16/
+            # NV61/NV12/... with no UYVY at all. The bridge still sends
+            # UYVY over CSI - that is the ISP *input* format, set on
+            # the isp-subdev sink pad; what comes out of the main path
+            # is YUYV.
+            - "--format=yuyv"
+            - "--buffers=6"
+            # No --encoder here on purpose: the wrapper above picks it.
+            # Hardware MJPEG through Rockchip MPP when the rkmpp variant is
+            # installed and the VPU is present, software JPEG otherwise. See
+            # usr/lib/pikvm/ustreamer-encoder for why it is a wrapper and not
+            # an argument, and docs/roadmap.md for how the hardware path got
+            # here. Like upstream v2 the wrapper asks for "m2m-image"; the
+            # V4L2_PIX_FMT_JPEG that mode requires is one of the things
+            # patches/libv4l-rkmpp adds to the plugin.
+            - "--quality={quality}"
+            - "--desired-fps={desired_fps}"
+            # 30 is what upstream PiKVM ships; ustreamer's own default is
+            # 0, i.e. disabled. Dropping happens in ustreamer's HTTP layer,
+            # after encoding, so on the VPU it no longer saves any CPU - a
+            # dropped frame cost exactly as much to produce as a sent one.
+            # What it still saves is network.
+            #
+            # Measured here at 1080p60 with --workers=2:
+            #
+            #   value  static   worst frame gap   traffic while watching
+            #     30   1.0 fps      1035 ms              40 KB/s
+            #      5   5.0 fps       214 ms             304 KB/s
+            #      0  30.0 fps        52 ms             1.8 MB/s
+            #
+            # Kept at 30 deliberately. The long gaps only happen while the
+            # screen is not changing, which is also when there is nothing to
+            # see; once something moves, frames flow at the 33 ms median.
+            # This setting was briefly suspected of being the "laggy mouse"
+            # everyone could feel - it was not. That was a target-side USB
+            # fault; see docs/known-issues.md. Lower it to 5, or 0, if the stream
+            # itself ever feels late rather than the input.
+            - "--drop-same-frames=30"
+            - "--unix={unix}"
+            - "--unix-rm"
+            - "--unix-mode=0660"
+            - "--exit-on-parent-death"
+            - "--process-name-prefix={process_name_prefix}"
+            - "--notify-parent"
+            - "--no-log-colors"
+            - "--jpeg-sink=kvmd::ustreamer::jpeg"
+            - "--jpeg-sink-mode=0660"
+            # H.264, for WebRTC and for VNC's h264 encoding. Same VEPU2 that
+            # encodes the JPEG stream above, reached through a second
+            # libv4l-rkmpp instance - see usr/lib/pikvm/ustreamer-encoder,
+            # which is also what supplies --h264-m2m-device and what strips
+            # these four arguments back out on a base image that has no
+            # hardware encoder to point them at.
+            - "--h264-sink=kvmd::ustreamer::h264"
+            - "--h264-sink-mode=0660"
+            - "--h264-bitrate={h264_bitrate}"
+            - "--h264-gop={h264_gop}"
+
+media:
+    memsink:
+        h264:
+            sink: "kvmd::ustreamer::h264"
+
+vnc:
+    memsink:
+        jpeg:
+            sink: "kvmd::ustreamer::jpeg"
+        h264:
+            sink: "kvmd::ustreamer::h264"

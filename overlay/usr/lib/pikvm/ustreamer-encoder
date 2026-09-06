@@ -1,0 +1,95 @@
+#!/bin/sh
+# Run ustreamer with hardware encoding when this image has it.
+#
+# kvmd's streamer.cmd is a plain argv list with no way to set environment
+# variables, and the hardware path needs two: LD_PRELOAD for libv4l's
+# v4l2convert shim, and LD_LIBRARY_PATH so that shim resolves our patched
+# libv4l2 rather than the system one. Setting them on kvmd.service instead
+# would put an LD_PRELOAD on kvmd's Python interpreter as well, which is not
+# something to do to a daemon that only spawns the encoder. Hence a wrapper
+# that execs, so the process kvmd is watching is still ustreamer itself.
+#
+# The fallback is not decoration. main.yaml is shared by both image variants
+# and only the "rkmpp" one ships /opt/rkmpp, so on a base image every test
+# below fails and this runs the software encoder exactly as before. Losing
+# hardware encoding costs three cores; getting no video at all costs the KVM.
+set -e
+
+PREFIX=/opt/rkmpp
+CONVERT="${PREFIX}/lib/libv4l/v4l2convert.so"
+PLUGIN="${PREFIX}/lib/libv4l/plugins/libv4l-rkmpp.so"
+# Must be under /dev/video*: libv4l only dispatches to a plugin for paths that
+# look like V4L2 devices. See usr/lib/tmpfiles.d/pikvm-rkmpp.conf.
+MJPEG_DEV=/dev/video-enc-mjpeg
+H264_DEV=/dev/video-enc-h264
+
+hw=no
+if [ -r "${CONVERT}" ] && [ -r "${PLUGIN}" ] && [ -r "${MJPEG_DEV}" ] && [ -e /dev/mpp_service ]; then
+    hw=yes
+fi
+
+# H.264 is tested separately from MJPEG, not folded into the same flag. They
+# are two independent encoder instances behind two device files, and an image
+# that has one without the other is a real state - anything updated in place
+# from before the H.264 node existed looks exactly like that.
+h264=no
+if [ "${hw}" = yes ] && [ -r "${H264_DEV}" ]; then
+    h264=yes
+fi
+
+if [ "${h264}" = no ]; then
+    # Drop every --h264-* argument on the way through.
+    #
+    # Software H.264 is not a thing ustreamer offers: --h264-sink needs a
+    # V4L2 M2M encoder, so without one ustreamer would open the auto-selected
+    # /dev/video11 - a Raspberry Pi node - fail, and retry that failure once
+    # per frame forever. The JPEG stream would survive but the log would not
+    # be worth reading. Better to arrive without the option than to fail on
+    # it repeatedly.
+    #
+    # Written as a positional rebuild because this is /bin/sh: no arrays, and
+    # "$@" is the only thing that survives an argument containing spaces.
+    for arg in "$@"; do
+        case "${arg}" in
+            --h264-*) ;;
+            *) set -- "$@" "${arg}" ;;
+        esac
+        shift
+    done
+fi
+
+if [ "${hw}" = yes ]; then
+    LD_LIBRARY_PATH="${PREFIX}/lib${LD_LIBRARY_PATH:+:${LD_LIBRARY_PATH}}"
+    export LD_LIBRARY_PATH
+    export LD_PRELOAD="${CONVERT}"
+
+    # Named rather than left to ustreamer's auto-selection, which looks for
+    # /dev/video11 and would not find it here.
+    if [ "${h264}" = yes ]; then
+        set -- --h264-m2m-device="${H264_DEV}" "$@"
+    fi
+
+    # m2m-image, not m2m-video. Both reach the same MPP encoder, but
+    # m2m-image is the JPEG-shaped API: it passes --quality through as
+    # V4L2_CID_JPEG_COMPRESSION_QUALITY instead of converting it into a
+    # bitrate for a rate controller, so quality is fixed and identical
+    # frames encode identically - which is what makes --drop-same-frames
+    # work. It also uses mmap rather than importing dma-bufs.
+    #
+    # Two workers, not one and not four. One serialises the memcpy into the
+    # encoder's buffer with the wait for the hardware, which caps the stream
+    # at ~19 fps - the VPU is idle half the time. Two overlaps them and
+    # reaches the ~30 fps the encoder path can sustain. A third buys 1 fps
+    # for another 12% of a core, and each worker is a separate MPP encoder
+    # instance contending for the one VPU, so more is not better.
+    #
+    # --workers applies to the JPEG encoder only; the H.264 sink runs one
+    # encoder regardless, which is what H.264 wants anyway - a second
+    # instance would have its own reference frames and its own GOP.
+    exec /usr/bin/ustreamer --encoder=m2m-image --m2m-device="${MJPEG_DEV}" \
+        --workers=2 "$@"
+fi
+
+# Software JPEG on the A72/A53 pair. Costs roughly three of six cores at
+# 1080p and is the reason the hardware path above exists.
+exec /usr/bin/ustreamer --encoder=cpu --workers=4 "$@"

@@ -1,0 +1,108 @@
+diff --git a/drivers/media/i2c/tc35874x.c b/drivers/media/i2c/tc35874x.c
+index 9b80e9e6c..60e9d7d4f 100644
+--- a/drivers/media/i2c/tc35874x.c
++++ b/drivers/media/i2c/tc35874x.c
+@@ -453,13 +453,66 @@
+ 			V4L2_DV_BT_FRAME_HEIGHT(t) * V4L2_DV_BT_FRAME_WIDTH(t));
+ }
+ 
++/*
++ * Smallest CSI FIFO level, in 32-bit words, that gets one line of the current
++ * mode out without the FIFO running dry.
++ *
++ * The FIFO (512 x 32, see struct tc35874x_platform_data) sits between the HDMI
++ * receiver and the CSI-2 transmitter, and the transmitter drains it a good
++ * deal faster than the receiver fills it: 372.6 MB/s on this board against
++ * 127 MB/s for a 63.6 MHz pixel clock. So the bridge buffers part of a line
++ * before it starts sending, and if it starts too early the FIFO empties
++ * partway through and the rest of the line goes out as zeroes. Zero-filled
++ * YUV is bright green, which is what that looks like on screen.
++ *
++ * Filling at F bytes/s, draining at D, starting after N bytes are buffered,
++ * the FIFO lasts N/(D-F) seconds and ships N*D/(D-F) bytes in that time. For
++ * a line of L bytes:
++ *
++ *	N >= L * (D - F) / D		level = N / 4
++ *
++ * F is two bytes per pixel at the incoming pixel clock (YUV422, 8 bits per
++ * component). D is bps_pr_lane * lanes / 8, and bps_pr_lane is twice the link
++ * frequency - which is why this uses link_freq_menu_items[] rather than what
++ * probe read out of the endpoint. The two do not agree: the device tree still
++ * says 297 MHz, the REF_02 default, while tc35874x_set_pll() programs the PLL
++ * to 372.6 MHz. Patch 0005 fixed the control to report the real rate; the
++ * property was left alone. Getting this wrong is silent - it computes 292 for
++ * a mode that needs 337, lands under the table's 300, and nothing happens.
++ *
++ * Measured against 1024x768p60, which is corrupt at a level of 316 and clean
++ * at 320 with a 65 MHz clock: this returns 333 there, i.e. it errs about 4%
++ * high, which is the direction to err in.
++ */
++#define TC35874X_FIFO_WORDS	512
++
++static u16 tc35874x_min_fifo_level(struct tc35874x_state *state,
++				   unsigned int width, u64 pixelclock)
++{
++	u64 csi_byte_rate, pixel_byte_rate, level;
++
++	if (!pixelclock || !state->csi_lanes_in_use)
++		return 0;
++
++	csi_byte_rate = div_u64((u64)link_freq_menu_items[0] * 2 *
++				state->csi_lanes_in_use, 8);
++	pixel_byte_rate = pixelclock * 2;
++	if (pixel_byte_rate >= csi_byte_rate)
++		return 0;	/* input outruns the link; the FIFO cannot dry */
++
++	level = (u64)width * 2 * (csi_byte_rate - pixel_byte_rate);
++	level = div_u64(level, csi_byte_rate * 4);
++
++	return min_t(u64, level, TC35874X_FIFO_WORDS - 1);
++}
++
+ static int tc35874x_get_detected_timings(struct v4l2_subdev *sd,
+ 				     struct v4l2_dv_timings *timings)
+ {
+ 	struct v4l2_bt_timings *bt = &timings->bt;
+ 	unsigned width, height, frame_width, frame_height, frame_interval, fps;
+ 	struct tc35874x_state *state = to_state(sd);
+-	u16 fifo_level;
++	u16 fifo_level, min_level;
+ 
+ 	memset(timings, 0, sizeof(struct v4l2_dv_timings));
+ 
+@@ -520,8 +573,34 @@
+ 			fifo_level = 300;
+ 		}
+ 
+-		if ((bt->interlaced == V4L2_DV_INTERLACED) || (fps <= 33))
++		if ((bt->interlaced == V4L2_DV_INTERLACED) || (fps <= 33)) {
++			/*
++			 * tc35874x_set_pll() runs this case at prd 2, fbd 65 -
++			 * 877.5 Mbps, not the 745.2 the link_freq control
++			 * advertises - so the arithmetic below does not apply
++			 * and the D-PHY is mismatched anyway. Left exactly as
++			 * the vendor had it; see patch 0005.
++			 */
+ 			fifo_level = 300;
++		} else {
++			/*
++			 * The table above was tuned for 1080p60 and 720p60;
++			 * everything else falls through to a flat 300, which
++			 * is below what pixel clocks under ~70 MHz need.
++			 * Raise, never lower - the tuned values are known good
++			 * and the formula has nothing better to offer them
++			 * (1080p60 computes to 194 against a table 370).
++			 */
++			min_level = tc35874x_min_fifo_level(state, width,
++							    bt->pixelclock);
++			if (min_level > fifo_level) {
++				v4l2_dbg(1, debug, sd,
++					 "%s: %ux%u@%u needs fifo_level %u, table says %u\n",
++					 __func__, width, height, fps,
++					 min_level, fifo_level);
++				fifo_level = min_level;
++			}
++		}
+ 
+ 		v4l2_dbg(2, debug, sd, "%s interlaced:%d, fifo_level:%d\n",
+ 			__func__, bt->interlaced, fifo_level);

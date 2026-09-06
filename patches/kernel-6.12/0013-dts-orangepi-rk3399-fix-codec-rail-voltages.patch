@@ -1,0 +1,85 @@
+dts: orangepi-rk3399: give the codec rails their real voltages
+
+LDO_REG2, LDO_REG5 and LDO_REG7 are described with the regulator's full
+adjustable span instead of the board's voltage, so the core leaves them
+wherever the PMIC powered on - which here is the bottom of each span.
+vcca1v8_codec sat at 0.8 V and vcca3v0_codec at 1.8 V.
+
+That rail is both the ALC5651's supply and the reference &io_domains uses
+for the audio IO domain (GPIO3D + GPIO4A, i.e. i2s0 and i2c1), so the codec
+probes but corrupts sustained I2C traffic, and every DAPM write to a
+register with no regmap cache default fails with -ENXIO.
+
+--- a/arch/arm64/boot/dts/rockchip/rk3399-orangepi.dts
++++ b/arch/arm64/boot/dts/rockchip/rk3399-orangepi.dts
+@@ -666,12 +666,46 @@
+ 				};
+ 			};
+ 
++			/*
++			 * Three of this PMIC's LDOs are described here with the
++			 * regulator's whole adjustable span rather than the voltage
++			 * the board actually wants, and the regulator core has no
++			 * way to guess: a rail whose power-on default already sits
++			 * inside [min,max] is left exactly where it is. On this
++			 * board the RK808 comes up at the bottom of each span, so
++			 * the rails settle two steps below spec and stay there:
++			 *
++			 *   vcc3v0_tp      1.8 V, wants 3.0 V
++			 *   vcca3v0_codec  1.8 V, wants 3.0 V
++			 *   vcca1v8_codec  0.8 V, wants 1.8 V
++			 *
++			 * The last two are the ALC5651's analogue and digital
++			 * supplies, and vcca1v8_codec is also what &io_domains uses
++			 * as the "audio" domain reference - the domain that covers
++			 * GPIO3D and GPIO4A, so i2s0 *and* i2c1. Undervolted, the
++			 * codec half-works in a way that is easy to misread: it
++			 * answers a single I2C read correctly, so it probes, but
++			 * under sustained traffic it stops driving SDA partway
++			 * through a byte. 2000 back-to-back reads of the device ID
++			 * returned ~10-20% either NAKed or corrupted high (0x6281
++			 * arriving as 0x62ff, 0x67ff, 0x7fff), while the TC358749 on
++			 * the same bus was 2000/2000 perfect. In the kernel that
++			 * shows up as -ENXIO out of every regmap_update_bits() on a
++			 * register with no cache default - which is exactly the set
++			 * DAPM needs (0x61/0x62 power, 0x84 ASRC) - so the card
++			 * builds, the mixer settings appear to take, and capture
++			 * returns silence.
++			 *
++			 * The other LDOs are equally loose here but happen to power
++			 * on at the right voltage, so they are left alone: pinning
++			 * them would change nothing that can be measured.
++			 */
+ 			vcc3v0_tp: LDO_REG2 {
+ 				regulator-name = "vcc3v0_tp";
+ 				regulator-always-on;
+ 				regulator-boot-on;
+-				regulator-min-microvolt = <1800000>;
+-				regulator-max-microvolt = <3400000>;
++				regulator-min-microvolt = <3000000>;
++				regulator-max-microvolt = <3000000>;
+ 				regulator-state-mem {
+ 					regulator-off-in-suspend;
+ 				};
+@@ -711,8 +745,8 @@
+ 				regulator-name = "vcca3v0_codec";
+ 				regulator-always-on;
+ 				regulator-boot-on;
+-				regulator-min-microvolt = <1800000>;
+-				regulator-max-microvolt = <3400000>;
++				regulator-min-microvolt = <3000000>;
++				regulator-max-microvolt = <3000000>;
+ 				regulator-state-mem {
+ 					regulator-off-in-suspend;
+ 				};
+@@ -734,8 +768,8 @@
+ 				regulator-name = "vcca1v8_codec";
+ 				regulator-always-on;
+ 				regulator-boot-on;
+-				regulator-min-microvolt = <800000>;
+-				regulator-max-microvolt = <2500000>;
++				regulator-min-microvolt = <1800000>;
++				regulator-max-microvolt = <1800000>;
+ 				regulator-state-mem {
+ 					regulator-off-in-suspend;
+ 				};

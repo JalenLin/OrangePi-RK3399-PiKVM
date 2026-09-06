@@ -1,0 +1,16 @@
+[Unit]
+Description=PiKVM - grow the MSD partition to fill the card (first boot)
+DefaultDependencies=no
+After=systemd-remount-fs.service
+Before=local-fs.target var-lib-kvmd-msd.mount kvmd.service
+ConditionPathExists=!/var/lib/pikvm/.msd-expanded
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/lib/pikvm/expand-msd.sh
+ExecStartPost=/usr/bin/mkdir -p /var/lib/pikvm
+ExecStartPost=/usr/bin/touch /var/lib/pikvm/.msd-expanded
+
+[Install]
+WantedBy=sysinit.target

@@ -1,0 +1,806 @@
+dts: orangepi-rk3399: describe this board
+
+Everything in rk3399-orangepi.dts that describes the OrangePi RK3399 rather
+than fixing a bug someone else also has. It is one patch on purpose: this is
+board configuration, none of it is upstreamable, and carrying it as four
+separate diffs on one file bought nothing but a fixed apply order and four
+sets of context that shifted whenever any of them changed.
+
+The rail-voltage fix is deliberately NOT here - see the next patch. That one
+corrects a defect the upstream DTS has, so it stays separable.
+
+Five groups. The full reasoning for each is in docs/patches.md.
+
+1. Boot, and getting a console back
+   The BSP U-Boot programs the vdd_log PWM rail from the *kernel's* device
+   tree, so rockchip,pwm_id / rockchip,pwm_voltage have to be here or the
+   board browns out before the kernel runs - silently, because it is a power
+   event and not a crash. stdout-path is removed (U-Boot hangs in
+   initr_serial rebuilding its console around it) while bootargs stays, since
+   the two serve different consumers. Console is ttyS2 at 115200: 1500000
+   reads fine on this wiring but corrupts on write.
+
+2. Storage and clocks
+   mmc0/mmc1 aliases edited in place rather than added as a second aliases
+   node - dtc merges two of them and the merge left the eMMC answering to two
+   sequence numbers. CPU rates pinned, and the whole of rk3399.dtsi's &cru
+   assigned-clocks list restated alongside them, because a property assigned
+   in an override node replaces the .dtsi's rather than merging with it.
+   Restating it is not redundant: omitting it deleted seventeen clock
+   assignments and left aclk_isp0 and aclk_vio at 12 MHz.
+
+3. HDMI IN
+   ext_cam_clk, the hdmiin_gpios pinctrl group, tc358749x@1f, and the fwnode
+   graph through mipi_dphy_rx0 to rkisp1_0. The interrupt is
+   IRQ_TYPE_LEVEL_HIGH because that is what tc35874x_probe() requests, and a
+   mismatch only shows itself on a rebind. link-frequencies is 372600000,
+   which is what the PLL is actually programmed to.
+
+4. VPU
+   mpp-srv, vepu@ff650000 and iommu@ff650800 all inherit status = "disabled"
+   from rk3399.dtsi. Rockchip enables them in rk3399-linux.dtsi, which this
+   board's DTS does not include, so the board had no /dev/mpp_service and
+   every piece of MPP userspace failed at open(). Both codecs the KVM runs
+   on - MJPEG and H.264 - are behind this.
+
+5. Wi-Fi and HDMI IN audio
+   brcm,board-type = "AP6356S" so brcmfmac asks linux-firmware for an NVRAM
+   blob that exists. And i2s0 plus the ALC5651 as a simple-audio-card named
+   "tc358743", which is the device kvmd's stock janus config already opens.
+   The audio path is known not to carry sound - the receiver's I2S goes into
+   the codec's second port and that port has no clock - but the card, the
+   codec binding and the i2s0 pin group are all correct and measured, so the
+   description stays rather than being deleted and rediscovered later.
+
+--- a/arch/arm64/boot/dts/rockchip/rk3399-orangepi.dts
++++ b/arch/arm64/boot/dts/rockchip/rk3399-orangepi.dts
+@@ -15,15 +15,72 @@
+ 	model = "Orange Pi RK3399 Board";
+ 	compatible = "xunlong,rk3399-orangepi", "rockchip,rk3399";
+ 
++	/*
++	 * U-Boot assigns MMC sequence numbers from these aliases. Without
++	 * them it falls back to guessing, and once it has switched to this
++	 * device tree the guess collides with the device it already bound
++	 * from its own:
++	 *
++	 *   Device 'mmc@fe320000': seq 1 is in use by 'dwmmc@fe320000'
++	 *   MMC: no card present / Could not get mmc 1
++	 *
++	 * The collision is a naming difference, nothing more - 4.4 calls
++	 * these dwmmc@/sdhci@, mainline calls both mmc@ - but it costs
++	 * U-Boot the SD card it was about to load the kernel from. The
++	 * numbering here matches what U-Boot already reports: SD is 1,
++	 * eMMC is 0.
++	 *
++	 * Edited in place rather than added as a second aliases node. dtc
++	 * merges two aliases nodes in the same tree, and the merge kept
++	 * mainline's mmc2 = &sdhci next to the new mmc0 = &sdhci, so the
++	 * eMMC answered to two sequence numbers while sdio0 was left with
++	 * none. U-Boot takes the first match and booted anyway - an
++	 * accident, and one that would have stopped being harmless the
++	 * moment anything iterated the aliases instead of looking one up.
++	 *
++	 * sdio0 (WiFi) needs no alias of its own: it carries no block
++	 * device, so nothing has to be able to name it.
++	 */
+ 	aliases {
+ 		ethernet0 = &gmac;
+-		mmc0 = &sdio0;
++		mmc0 = &sdhci;
+ 		mmc1 = &sdmmc;
+-		mmc2 = &sdhci;
+ 	};
+ 
++	/*
++	 * No stdout-path on purpose.
++	 *
++	 * The BSP U-Boot's initr_serial() honours this property and rebuilds
++	 * the console around the node it names. Doing that from a 6.12 device
++	 * tree is where U-Boot stops talking - the initcall trace ends inside
++	 * initr_serial and nothing follows. The 4.4 vendor tree has no
++	 * stdout-path at all, so U-Boot keeps the console it set up from
++	 * CONFIG_DEBUG_UART and boots fine.
++	 *
++	 * Linux is unaffected: it takes its console from the bootargs U-Boot
++	 * builds (console=ttyFIQ0 console=tty1), not from here.
++	 */
+ 	chosen {
+-		stdout-path = "serial2:1500000n8";
++		/*
++		 * Taken from the 4.4 tree's rk3399-linux.dtsi. U-Boot appends
++		 * its own half (storagemedia=, root=PARTUUID=, rw, rootwait);
++		 * this half is where the console comes from, and without it
++		 * the kernel gets no console= at all and boots in silence.
++		 *
++		 * 115200, not the 1500000 U-Boot uses. Reading at 1500000 is
++		 * clean, but typing into it is not - characters sent to the
++		 * board come back corrupted on this wiring, while 115200 is
++		 * reliable in both directions. A console you cannot type on
++		 * is not a console. U-Boot's rate is compiled in
++		 * (CONFIG_BAUDRATE), so its output stays at 1500000; only the
++		 * kernel and the login prompt move.
++		 *
++		 * Deliberately no stdout-path: the BSP U-Boot honours that
++		 * property and hangs inside initr_serial rebuilding its own
++		 * console around it. bootargs is for Linux, stdout-path is
++		 * what U-Boot trips over - only the latter has to go.
++		 */
++		bootargs = "earlycon=uart8250,mmio32,0xff1a0000 swiotlb=1 console=tty1 console=ttyS2,115200n8 rw rootfstype=ext4 rootwait coherent_pool=1m deferred_probe_timeout=10 clk_ignore_unused pd_ignore_unused";
+ 	};
+ 
+ 	clkin_gmac: external-gmac-clock {
+@@ -123,6 +180,14 @@
+ 		vin-supply = <&vcc3v3_sys>;
+ 	};
+ 
++	/* HDMI IN: TC358749XBG reference clock. */
++	ext_cam_clk: external-camera-clock {
++		compatible = "fixed-clock";
++		clock-frequency = <27000000>;
++		clock-output-names = "CLK_CAMERA_27MHZ";
++		#clock-cells = <0>;
++	};
++
+ 	vcc3v3_sys: vcc3v3-sys {
+ 		compatible = "regulator-fixed";
+ 		regulator-name = "vcc3v3_sys";
+@@ -173,7 +238,113 @@
+ 		regulator-boot-on;
+ 		regulator-min-microvolt = <800000>;
+ 		regulator-max-microvolt = <1400000>;
+-	};
++
++		/*
++		 * Consumed by the Rockchip BSP U-Boot, not by Linux. That
++		 * U-Boot programs this PWM rail from the kernel's own device
++		 * tree; without these two properties it cannot work out the
++		 * duty cycle, settles on the wrong voltage, and the board
++		 * browns out and resets before it ever reaches the kernel.
++		 * The 4.4 vendor tree carries them; this mainline-shaped one
++		 * does not.
++		 */
++		rockchip,pwm_id = <2>;
++		rockchip,pwm_voltage = <1000000>;
++	};
++};
++
++/*
++ * Pin the CPU cluster rates - and restate everything else rk3399.dtsi
++ * already assigns here, because this override replaces the property.
++ *
++ * A property assigned in an override node does not merge with the one in
++ * the .dtsi; it replaces it outright. rk3399.dtsi gives &cru a 17-entry
++ * assigned-clocks list that brings up the SoC's PLLs and bus clocks, and
++ * an earlier version of this node listed only ARMCLKB/ARMCLKL - which
++ * silently deleted all seventeen. Nothing complained. The clock tree was
++ * simply left wherever U-Boot had parked it:
++ *
++ *   cpll         24 MHz    (slow/bypass mode - never taken out of it)
++ *   aclk_isp0    12 MHz    cpll/2   - wanted 400 MHz
++ *   aclk_vio     12 MHz    cpll/2   - wanted 400 MHz
++ *   aclk_gic_pre  6 MHz    cpll/4   - wanted 200 MHz
++ *   pclk_ddr      6 MHz    cpll/4   - wanted 200 MHz
++ *   gpll        800 MHz             - wanted 594 MHz
++ *   npll        600 MHz             - wanted 1000 MHz
++ *
++ * Everything still ran, which is what made it hard to see. The ISP was
++ * the first consumer with a hard real-time budget: at 1080p60 it has to
++ * write ~250 MB/s, and with its AXI port and the VIO NOC both at 12 MHz
++ * it got roughly a fifth of that through. Frames came back as five
++ * stacked copies of a squashed picture with a per-frame
++ * CIF_ISP_PIC_SIZE_ERROR / CIF_ISP_DATA_LOSS storm and MI_STATUS
++ * reporting MP_Y_FIFO_FULL. Restoring the list makes the ISP write clean
++ * 1920x1080 frames with zero errors.
++ *
++ * The VOP AXI clocks are ours too, and they are the same bug a second time.
++ * rk3399.dtsi's list does not set them (the 4.4 vendor tree's does), so
++ * aclk_vop1_pre stayed where U-Boot left it: muxed to VPLL and divided by 3.
++ * VPLL tracks the HDMI pixel clock, so the VOP's *AXI* clock was chained to
++ * the display mode and came out at 49.5 MHz against the 400 MHz the vendor
++ * tree asks for. The VOP could not fetch pixels fast enough and underran
++ * continuously:
++ *
++ *   rockchip-vop ff8f0000.vop: [drm:vop_isr] *ERROR* POST_BUF_EMPTY irq err
++ *   vop_isr: 156838 callbacks suppressed
++ *
++ * - 32544 interrupts per second on one CPU. Setting aclk_vop1_pre to 400 MHz
++ * takes that to 0 and the errors stop entirely. ff8f0000 is vopl, which is
++ * ACLK_VOP1, and it is the one driving HDMI here; vop0 gets the same treatment
++ * for consistency.
++ *
++ * These target ACLK_VOP*_PRE, the mux+divider composites, not the ACLK_VOP*
++ * gates the 4.4 tree names: the gates are registered with flags 0, so no
++ * CLK_SET_RATE_PARENT, and setting a rate on them would not reach the divider.
++ * hclk_vop*_pre needs no entry - it is a fixed /2 off aclk_vop*_pre and
++ * follows to 200 MHz on its own.
++ *
++ * So: the sixteen entries below through ACLK_VDU are rk3399.dtsi's own
++ * list, unchanged. The last four are ours.
++ *
++ * On those two - rockchip-cpufreq is a module now, loaded from systemd
++ * (see docs/patches.md), so between kernel init and that load nothing
++ * drives the CPU clocks and the A72 cluster comes up at 12 MHz. These
++ * rates are what the clusters run at during that window. 1200 MHz was
++ * also the fastest big-cluster OPP the boot voltage allowed back when
++ * there was no cpufreq at all: opp-table-1 asks 950 mV for 1200 and
++ * 1025 mV for 1416, and vdd_cpu_b booted at 1000 mV. Once the module
++ * loads, OPP drives that regulator and both clusters scale properly.
++ * The little cluster is left where it already is.
++ */
++&cru {
++	assigned-clocks =
++		<&cru PLL_GPLL>, <&cru PLL_CPLL>,
++		<&cru PLL_NPLL>,
++		<&cru ACLK_PERIHP>, <&cru HCLK_PERIHP>,
++		<&cru PCLK_PERIHP>,
++		<&cru ACLK_PERILP0>, <&cru HCLK_PERILP0>,
++		<&cru PCLK_PERILP0>, <&cru ACLK_CCI>,
++		<&cru HCLK_PERILP1>, <&cru PCLK_PERILP1>,
++		<&cru ACLK_VIO>, <&cru ACLK_HDCP>,
++		<&cru ACLK_GIC_PRE>,
++		<&cru PCLK_DDR>,
++		<&cru ACLK_VDU>,
++		<&cru ACLK_VOP0_PRE>, <&cru ACLK_VOP1_PRE>,
++		<&cru ARMCLKB>, <&cru ARMCLKL>;
++	assigned-clock-rates =
++		 <594000000>,  <800000000>,
++		<1000000000>,
++		 <150000000>,   <75000000>,
++		  <37500000>,
++		 <100000000>,  <100000000>,
++		  <50000000>, <600000000>,
++		 <100000000>,   <50000000>,
++		 <400000000>, <400000000>,
++		 <200000000>,
++		 <200000000>,
++		 <400000000>,
++		 <400000000>,  <400000000>,
++		<1200000000>,  <816000000>;
+ };
+ 
+ &cpu_l0 {
+@@ -238,8 +409,32 @@
+ 	status = "okay";
+ };
+ 
++/*
++ * DDC goes through i2c3, so the HDMI controller must not also claim the DDC
++ * pins for its own internal I2C.
++ *
++ * rk3399.dtsi gives this node pinctrl-0 = <&hdmi_i2c_xfer>, which is
++ * gpio4 RK_PC0/RK_PC1 at mux 3. i2c3_xfer is the same two pins at mux 1, so
++ * with ddc-i2c-bus = <&i2c3> the two fight and i2c3 loses:
++ *
++ *   rockchip-pinctrl: pin gpio4-17 already requested by ff940000.hdmi;
++ *                     cannot claim for ff130000.i2c
++ *
++ * i2c3 then never probes, dw-hdmi's component bind defers forever waiting for
++ * the adapter named by ddc-i2c-bus, and display-subsystem never completes -
++ * it just re-binds the two VOPs in a loop, leaves /dev/dri absent and the
++ * HDMI output black. Nothing in the log points at the pin: the deferral is
++ * silent and the pinctrl line looks like an unrelated i2c complaint.
++ *
++ * This is the usual shape of this port's problems - a mainline-derived board
++ * dts on a vendor BSP dtsi. Mainline's rk3399.dtsi leaves DDC to the board;
++ * Rockchip's claims it in the SoC dtsi. Overriding pinctrl-0 here to CEC only
++ * lets i2c3 have the pins.
++ */
+ &hdmi {
+ 	ddc-i2c-bus = <&i2c3>;
++	pinctrl-names = "default";
++	pinctrl-0 = <&hdmi_cec>;
+ 	status = "okay";
+ };
+ 
+@@ -247,6 +442,126 @@
+ 	status = "okay";
+ };
+ 
++/*
++ * HDMI IN audio.
++ *
++ * The receiver hands the incoming HDMI audio out as I2S, and until now
++ * nothing on the SoC side listened: i2s0 was "disabled", so the board came
++ * up with "no soundcards found" while the TC358749 sat there producing a
++ * perfectly good 48 kHz stereo stream. tc35874x_set_hdmi_audio() already
++ * does the receiver half - clears FORCE_MUTE, selects I2S framing, sets
++ * AUDCHNUM_2 - so all that was ever missing was somewhere for the samples
++ * to go.
++ *
++ * The obvious wiring, receiver -> i2s0, is not this board's wiring. Page 25
++ * of the schematic has two separate buses that only look alike by name:
++ *
++ *   I2S0_*_HDMIIN   TC358749 -> ALC5651 port 2 (DACDAT2/LRCK2/BCLK2)
++ *   I2S0_*          RK3399   -> ALC5651 port 1 (via the 33R R7107..R7112)
++ *
++ * They never meet. The receiver's I2S goes into the codec, not into the
++ * SoC, and I2S_CLK_HDMIIN lands on test point TP50271 and stops there. So
++ * the path from HDMI to a capture buffer runs *through* the ALC5651:
++ *
++ *   TC358749 --I2S--> ALC5651 AIF2 (codec is clock slave; the receiver
++ *                     drives BCLK2/LRCK2)
++ *            internal digital loopback, no analogue detour:
++ *                     IF2 DAC -> DAC L2/R2 Mux -> DD MIX
++ *                             -> Stereo1 ADC MIX -> IF1 ADC1
++ *   ALC5651 --I2S--> RK3399 i2s0 SDI0 (SoC is clock master; it drives
++ *                    BCLK1/LRCK1 and the codec's MCLK off GPIO4_A0)
++ *
++ * That is why this node makes the *cpu* side both bitclock- and
++ * frame-master, and why i2s0 takes the full i2s0_2ch_bus: SCLK, LRCK_RX,
++ * LRCK_TX, SDI0, SDO0 and - the one that matters most - GPIO4_A0/I2S_CLK,
++ * the codec's MCLK. Nothing else on the board drives that pin, so leaving
++ * it out leaves the codec without a system clock.
++ *
++ * The two clock domains either side of the loopback are genuinely
++ * independent (the receiver's 48 kHz is not the SoC's), so the codec's ASRC
++ * has to bridge them. That is a runtime setting, not a device tree one -
++ * see the mixer setup shipped with the image.
++ *
++ * The "HDMIIN" microphone widget exists only to give the codec's
++ * "AIF2 Playback" DAI widget a DAPM source. Without it that widget has no
++ * incoming path (nothing binds rt5651-aif2 to a dai_link), the walk from
++ * "AIF1 Capture" back through IF2 DAC finds no endpoint, and DAPM leaves
++ * the whole loopback powered down - the capture would run and return
++ * silence. It is the same trick the vendor 4.4 machine driver
++ * (rockchip_rt5651_tc358749x.c) used, for the same reason.
++ *
++ * The card is called "tc358743" even though the part fitted here is a
++ * TC358749 and the card is really the ALC5651. The name is an interface,
++ * not a description: "hw:tc358743,0" is what kvmd's stock
++ * /etc/kvmd/janus/janus.plugin.ustreamer.jcfg opens, that file is a pacman
++ * backup file, and an upstream change to it arrives as a .pacnew whose
++ * usual three-way merge would silently drop any edit of ours and take
++ * WebRTC audio with it. Matching the name kvmd already expects means there
++ * is nothing to edit and nothing to lose. docs/hardware.md says which part
++ * is actually fitted.
++ */
++/ {
++	hdmiin_sound: hdmiin-sound {
++		compatible = "simple-audio-card";
++		status = "okay";
++
++		simple-audio-card,name = "tc358743";
++		simple-audio-card,format = "i2s";
++		simple-audio-card,mclk-fs = <256>;
++		simple-audio-card,bitclock-master = <&hdmiin_cpu_dai>;
++		simple-audio-card,frame-master = <&hdmiin_cpu_dai>;
++
++		simple-audio-card,widgets =
++			"Microphone", "HDMIIN",
++			"Headphone", "Headphone Jack",
++			"Line", "Line Out";
++		simple-audio-card,routing =
++			"AIF2 Playback", "HDMIIN",
++			"Headphone Jack", "HPOL",
++			"Headphone Jack", "HPOR",
++			"Line Out", "LOUTL",
++			"Line Out", "LOUTR";
++
++		hdmiin_cpu_dai: simple-audio-card,cpu {
++			sound-dai = <&i2s0>;
++		};
++
++		simple-audio-card,codec {
++			sound-dai = <&rt5651>;
++		};
++	};
++};
++
++/*
++ * i2s0_2ch_bus is the stock rk3399.dtsi group and already covers every pin
++ * this link needs, GPIO4_A0/I2S_CLK included; i2s0_8ch_bus, which the node
++ * defaults to, does not - it spends the extra pins on SDI1..3/SDO1..3 and
++ * leaves MCLK unmuxed.
++ */
++&i2s0 {
++	pinctrl-names = "bclk_on", "bclk_off";
++	pinctrl-0 = <&i2s0_2ch_bus>;
++	pinctrl-1 = <&i2s0_2ch_bus_bclk_off>;
++	status = "okay";
++};
++
++/*
++ * The ALC5651 is register-compatible with the RT5651 - the device ID at
++ * 0xff reads 0x6281, which is what rt5651_i2c_probe() insists on - so the
++ * mainline "realtek,rt5651" binding drives it as-is. mclk is the SoC's
++ * SCLK_I2S_8CH_OUT, whose source mux (CLKSEL_CON31[1:0]) picks clk_i2s0 at
++ * reset, so it follows the rate i2s0 is running at with nothing to assign.
++ */
++&i2c1 {
++	rt5651: audio-codec@1a {
++		compatible = "realtek,rt5651";
++		reg = <0x1a>;
++		clocks = <&cru SCLK_I2S_8CH_OUT>;
++		clock-names = "mclk";
++		#sound-dai-cells = <0>;
++	};
++};
++
+ &i2c0 {
+ 	clock-frequency = <400000>;
+ 	i2c-scl-rising-time-ns = <168>;
+@@ -276,7 +591,23 @@
+ 		vcc10-supply = <&vcc3v3_sys>;
+ 		vcc11-supply = <&vcc3v3_sys>;
+ 		vcc12-supply = <&vcc3v3_sys>;
+-		vddio-supply = <&vcc_3v0>;
++		/*
++		 * vddio-supply deliberately dropped.
++		 *
++		 * It pointed at &vcc_3v0, which is this PMIC's own LDO_REG8 - the
++		 * chip declared as its own I/O supply. The 4.4 tree says the same
++		 * thing and does not care, because fw_devlink did not exist yet.
++		 * 6.12 builds device links from these properties, spots the loop,
++		 * and reports:
++		 *
++		 *   /i2c@ff3c0000/pmic@1b: Fixed dependency cycle(s) with
++		 *     /i2c@ff3c0000/pmic@1b/regulators/LDO_REG8
++		 *
++		 * "Fixed" means it cut a link to break the loop, and consumers
++		 * downstream of the cut wait forever: dw_mci_init_slot() keeps
++		 * returning -EPROBE_DEFER on vqmmc-supply and the SD card never
++		 * enumerates.
++		 */
+ 
+ 		regulators {
+ 			vdd_center: DCDC_REG1 {
+@@ -364,6 +695,12 @@
+ 				regulator-boot-on;
+ 				regulator-min-microvolt = <1800000>;
+ 				regulator-max-microvolt = <3400000>;
++				/*
++				 * Also for the BSP U-Boot: this is the SD
++				 * card's I/O rail, and the 4.4 tree brings it
++				 * up at 3.0 V before touching the card.
++				 */
++				regulator-init-microvolt = <3000000>;
+ 				regulator-state-mem {
+ 					regulator-on-in-suspend;
+ 					regulator-suspend-microvolt = <3000000>;
+@@ -542,7 +879,9 @@
+ 
+ 		typec_con: connector {
+ 			compatible = "usb-c-connector";
+-			data-role = "host";
++			/* device, not host: this port emulates HID and mass
++			 * storage to the target. See &usbdrd_dwc3_0 below. */
++			data-role = "device";
+ 			label = "USB-C";
+ 			op-sink-microwatt = <1000000>;
+ 			power-role = "dual";
+@@ -593,6 +932,30 @@
+ };
+ 
+ &pinctrl {
++	/*
++	 * HDMI IN rails and control lines; without these the bridge is dark.
++	 *
++	 * RK_PA7 is the bridge's reset (driven by its reset-gpios) and RK_PB4
++	 * is its interrupt, so both are left as plain inputs for their
++	 * consumers to take over - the rails are the only thing this group
++	 * has to hold. RK_PB4 used to be pcfg_output_high here, which
++	 * contradicted the interrupts property on the same node; it worked
++	 * only because rockchip_irq_set_type() clears the line's port_ddr bit
++	 * and turns it back into an input behind pinctrl's back.
++	 */
++	hdmiin {
++		hdmiin_gpios: hdmiin-gpios {
++			rockchip,pins =
++				<2 RK_PA5 RK_FUNC_GPIO &pcfg_output_high>,
++				<2 RK_PA6 RK_FUNC_GPIO &pcfg_output_high>,
++				<2 RK_PA7 RK_FUNC_GPIO &pcfg_pull_none>,
++				<2 RK_PB0 RK_FUNC_GPIO &pcfg_output_high>,
++				<2 RK_PB1 RK_FUNC_GPIO &pcfg_output_high>,
++				<2 RK_PB2 RK_FUNC_GPIO &pcfg_output_low>,
++				<2 RK_PB4 RK_FUNC_GPIO &pcfg_pull_none>;
++		};
++	};
++
+ 	buttons {
+ 		pwr_btn: pwr-btn {
+ 			rockchip,pins = <0 RK_PA5 RK_FUNC_GPIO &pcfg_pull_up>;
+@@ -740,6 +1103,27 @@
+ 		interrupt-names = "host-wake";
+ 		pinctrl-names = "default";
+ 		pinctrl-0 = <&wifi_host_wake_l>;
++
++		/*
++		 * Names the NVRAM file brcmfmac loads after the firmware:
++		 * brcmfmac4356-sdio.AP6356S.txt. Without it the driver falls
++		 * back to the root compatible and asks for
++		 * brcmfmac4356-sdio.xunlong,rk3399-orangepi.txt, which no
++		 * linux-firmware release ships, so the chip would run on
++		 * built-in defaults - wrong PA gains, wrong antenna
++		 * configuration, no country code.
++		 *
++		 * AP6356S is the module fitted here, and linux-firmware
++		 * carries that file by name. It is also what every other
++		 * RK3399 board with this module ends up loading:
++		 * firefly-rk3399, nanopc-t4, nanopi-m4 and rock960 are all
++		 * symlinks to it upstream. This board is simply not one of
++		 * the ones a symlink was added for, and brcm,board-type is
++		 * the documented way to say so from the device tree - see
++		 * Documentation/devicetree/bindings/net/wireless/
++		 * brcm,bcm4329-fmac.yaml.
++		 */
++		brcm,board-type = "AP6356S";
+ 	};
+ };
+ 
+@@ -747,12 +1131,44 @@
+ 	bus-width = <4>;
+ 	cap-mmc-highspeed;
+ 	cap-sd-highspeed;
+-	cd-gpios = <&gpio0 RK_PA7 GPIO_ACTIVE_LOW>;
++	/*
++	 * No cd-gpios, and broken-cd instead.
++	 *
++	 * With cd-gpios the kernel believes that GPIO over everything else,
++	 * and on this board it reports an empty slot even when U-Boot has
++	 * just booted from the card sitting in it - so the SD card never
++	 * enumerates and the root filesystem is never found:
++	 *
++	 *   Waiting for root device PARTUUID=614e0000-0000...
++	 *
++	 * The 4.4 tree declares no cd-gpios at all and lets the controller's
++	 * own CDETECT do the job, which works. broken-cd goes one better and
++	 * polls, which also covers the intermittent detection this board has
++	 * shown throughout bring-up. The card is never hot-swapped here, so
++	 * the polling cost buys reliability we actually want.
++	 */
++	broken-cd;
+ 	clock-frequency = <150000000>;
+ 	disable-wp;
+ 	max-frequency = <150000000>;
+ 	pinctrl-names = "default";
+ 	pinctrl-0 = <&sdmmc_clk &sdmmc_cmd &sdmmc_cd &sdmmc_bus4>;
++	/*
++	 * The supplies are back.
++	 *
++	 * They were removed earlier because dw_mci_init_slot() kept deferring
++	 * on them and the card never enumerated. Removing them did get the
++	 * card detected - but with Linux no longer managing the SD rails the
++	 * filesystem started throwing -EIO under load:
++	 *
++	 *   EXT4-fs warning (mmcblk1p4): ... error -5 reading directory block
++	 *   systemd-journald: Failed to write entry ...: Input/output error
++	 *
++	 * That trade was a bad one, and the reasoning behind it was weak: the
++	 * deferral was diagnosed before the uart2 conflict and the console
++	 * changes were fixed, and those alter probe ordering. Restoring the
++	 * supplies is the experiment that was never run.
++	 */
+ 	vmmc-supply = <&vcc3v0_sd>;
+ 	vqmmc-supply = <&vcc_sdio>;
+ 	status = "okay";
+@@ -840,6 +1256,15 @@
+ 	};
+ };
+ 
++/*
++ * The ordinary 8250 console, deliberately - not Rockchip's FIQ debugger.
++ *
++ * ttyFIQ0 prints kernel messages but is a debug interface, not a tty: a
++ * getty on it never answers, so the board boots to a console you cannot log
++ * in on. Plain ttyS2 gives a real login. The two cannot coexist - both
++ * drivers would claim ff1a0000 - so the fiq-debugger node is gone and
++ * bootargs say console=ttyS2.
++ */
+ &uart2 {
+ 	status = "okay";
+ };
+@@ -864,9 +1289,34 @@
+ 	status = "okay";
+ };
+ 
++/*
++ * The Type-C port is the KVM's HID/MSD port, so it has to be able to be a USB
++ * *device*; the board dts forces both dwc3 controllers to "host", which leaves
++ * /sys/class/udc empty and kvmd-otg dead:
++ *
++ *   kvmd/apps/otg: RuntimeError: Can't find any UDC
++ *
++ * Without a UDC there is no keyboard, no mouse and no mass storage - the whole
++ * point of a KVM. usbdrd3_0 is the one wired to the Type-C connector (tcphy0
++ * for SS/DP, u2phy0 for HS, with a FUSB302 doing PD), so that is the port to
++ * make dual-role. usbdrd3_1 stays host: it drives the ordinary USB ports.
++ *
++ * "peripheral", not "otg". "otg" was tried first and is wrong here: with
++ * nothing plugged in, dwc3 picks host and brings up xhci-hcd.0.auto, so
++ * /sys/class/udc stays empty and kvmd-otg - which runs at boot, long before a
++ * cable is attached - still fails. The role never flips back on its own
++ * because nothing drives the role switch. Gadget-only registers the UDC
++ * unconditionally, which is what kvmd needs, and costs nothing: this port is
++ * the KVM's connection to the target, not a spare host port.
++ *
++ * The connector's data-role goes to "device" to match, so TCPM does not try to
++ * come up as DFP against a PC that is already one. Power is unaffected -
++ * power-role stays dual with try-power-role = "sink", so the board still takes
++ * bus power from the target the way a PiKVM v2 does.
++ */
+ &usbdrd_dwc3_0 {
+ 	status = "okay";
+-	dr_mode = "host";
++	dr_mode = "peripheral";
+ };
+ 
+ &usbdrd3_1 {
+@@ -893,3 +1343,177 @@
+ &vopl_mmu {
+ 	status = "okay";
+ };
++
++/*
++ * HDMI IN.
++ *
++ * Toshiba TC358749XBG, HDMI -> 4-lane MIPI CSI-2, feeding ISP0 through
++ * mipi_dphy_rx0. Ported from the 4.4 vendor tree, which is the only place
++ * this path has ever been wired up; mainline carries the same board DTS
++ * without it.
++ *
++ * reg = 0x1f, confirmed on the board rather than taken from the DTS: the
++ * vendor node is named tc358749x@0f but declares reg = <0x1f>, and 4.4.103
++ * used 0x0f. With the rails driven by hand, i2cdetect on i2c-1 answers at
++ * 1f - so the address is 0x1f and the vendor's node name is the typo.
++ *
++ * The chip has no power until the pinctrl below drives its rails, which is
++ * why an i2c scan finds nothing before this node exists.
++ */
++&i2c1 {
++	status = "okay";
++
++	tc358749x: hdmi-bridge@1f {
++		compatible = "toshiba,tc358749";
++		reg = <0x1f>;
++		clocks = <&ext_cam_clk>;
++		clock-names = "refclk";
++		reset-gpios = <&gpio2 RK_PA7 GPIO_ACTIVE_LOW>;
++		interrupt-parent = <&gpio2>;
++		/*
++		 * LEVEL_HIGH because that is what the driver asks for:
++		 * tc35874x_probe() requests the irq with IRQF_TRIGGER_HIGH.
++		 *
++		 * With LEVEL_LOW here the two disagree and request_irq() wins,
++		 * so a freshly booted board looks fine - the mapping is created
++		 * from this property, then immediately reprogrammed to HIGH.
++		 * The disagreement only shows on a rebind, where the second
++		 * of_irq_get() finds a live mapping of the other type:
++		 *
++		 *   irq: type mismatch, failed to map hwirq-12 for gpio@ff780000!
++		 *
++		 * (hwirq 12 is gpio2 RK_PB4.) The bridge then has no interrupt,
++		 * the CSI link never comes back, and only a reboot clears it.
++		 */
++		interrupts = <RK_PB4 IRQ_TYPE_LEVEL_HIGH>;
++		pinctrl-names = "default";
++		pinctrl-0 = <&hdmiin_gpios>;
++		rockchip,camera-module-index = <0>;
++		rockchip,camera-module-facing = "back";
++		rockchip,camera-module-name = "default";
++		rockchip,camera-module-lens-name = "default";
++		status = "okay";
++
++		port {
++			hdmiin_out0: endpoint {
++				remote-endpoint = <&mipi_in_ucam0>;
++				data-lanes = <1 2 3 4>;
++				clock-noncontinuous;
++				/*
++				 * 372.6 MHz, not the 297 MHz REF_02 default:
++				 * tc35874x_set_pll() runs the 4-lane
++				 * progressive case at prd 5, fbd 138, which is
++				 * 27 / 5 * 138 = 745.2 Mbps per lane. See patch
++				 * 0005, which fixed the V4L2_CID_LINK_FREQ the
++				 * D-PHY reads and left this behind.
++				 *
++				 * The property is not what programs the PHY -
++				 * phy-rockchip-mipi-rx reads the control, not
++				 * the device tree - but the driver does derive
++				 * bps_pr_lane from it, and 297 MHz made that
++				 * come out at exactly the 594000000 that
++				 * suppresses its own "untested bps per lane"
++				 * warning. The D-PHY timing counters below it
++				 * really are the REF_02 594 Mbps values, so
++				 * that warning should fire; letting it is the
++				 * point of correcting this.
++				 */
++				link-frequencies = /bits/ 64 <372600000>;
++			};
++		};
++	};
++};
++
++/* HDMI IN capture chain: bridge -> D-PHY -> ISP0 */
++&mipi_dphy_rx0 {
++	status = "okay";
++
++	ports {
++		#address-cells = <1>;
++		#size-cells = <0>;
++
++		port@0 {
++			reg = <0>;
++			#address-cells = <1>;
++			#size-cells = <0>;
++
++			mipi_in_ucam0: endpoint@1 {
++				reg = <1>;
++				remote-endpoint = <&hdmiin_out0>;
++				data-lanes = <1 2 3 4>;
++			};
++		};
++
++		port@1 {
++			reg = <1>;
++			#address-cells = <1>;
++			#size-cells = <0>;
++
++			dphy_rx0_out: endpoint@0 {
++				reg = <0>;
++				remote-endpoint = <&isp0_mipi_in>;
++			};
++		};
++	};
++};
++
++&rkisp1_0 {
++	status = "okay";
++
++	port {
++		#address-cells = <1>;
++		#size-cells = <0>;
++
++		isp0_mipi_in: endpoint@0 {
++			reg = <0>;
++			remote-endpoint = <&dphy_rx0_out>;
++		};
++	};
++};
++
++&isp0_mmu {
++	status = "okay";
++};
++
++/*
++ * Hardware H.264 encoder.
++ *
++ * RK3399's VPU is reachable two ways, and rk3399.dtsi defines both over the
++ * same registers, both disabled:
++ *
++ *   video-codec@ff650000  "rockchip,rk3399-vpu"      - mainline hantro
++ *   vepu@ff650000         "rockchip,vpu-encoder-v2"  - Rockchip MPP service
++ *
++ * Only one of them may be enabled. This takes the MPP one, because hantro
++ * has no H.264 encoder at all - hantro_h1_jpeg_enc.c is its only encoder,
++ * everything else in that driver decodes - while MPP's VEPU2 does. Our
++ * config agrees: CONFIG_VIDEO_HANTRO is not set, CONFIG_ROCKCHIP_MPP_VEPU2
++ * and CONFIG_ROCKCHIP_MPP_SERVICE are both =y.
++ *
++ * Nothing else was missing. The drivers were built in all along; every node
++ * they bind to just inherited status = "disabled" from the SoC dtsi, and no
++ * board file here ever turned them on, so the board came up with no
++ * /dev/mpp_service and every MPP userspace - mpi_enc_test, libv4l-rkmpp,
++ * gstreamer's mpph264enc - failed at open(). Rockchip's own
++ * rk3399-linux.dtsi is where the vendor does this; this board's DTS does not
++ * include it.
++ *
++ * Encode only, on purpose. A KVM encodes the captured screen and never
++ * decodes anything, so vdpu, rkvdec/vdec_mmu and iep/iep_mmu stay off: they
++ * are two more power domains and one more IOMMU brought up at boot for
++ * nothing. Turning them on is three more "okay" blocks if a decode path ever
++ * becomes useful. The taskqueue that rk3399.dtsi sizes for two consumers
++ * costs one idle kthread when only one exists (mpp_service.c creates the
++ * queues from rockchip,taskqueue-count regardless of who registers).
++ */
++&mpp_srv {
++	status = "okay";
++};
++
++&vpu_mmu {
++	status = "okay";
++};
++
++&vepu {
++	status = "okay";
++};

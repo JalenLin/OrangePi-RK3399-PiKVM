@@ -1,0 +1,3 @@
+PIKVM_MODEL=v2
+PIKVM_VIDEO=hdmi
+PIKVM_BOARD=orangepi-rk3399

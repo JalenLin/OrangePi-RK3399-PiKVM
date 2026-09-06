@@ -1,0 +1,288 @@
+libv4l-rkmpp: make the H.264 encoder reachable from a stateful V4L2 client
+
+Companion to 0001, which got the MJPEG path working. Everything here is
+H.264-only; none of it changes the MJPEG stream this board runs on.
+
+The plugin's H.264 encoder works - mpi_enc_test and the plugin's own
+Chromium path both produce decodable 1080p - but no stateful V4L2 client
+can reach it. ustreamer sets seven controls before it touches a format
+and aborts on the first failure, and four of the seven were wrong here.
+Measured against ustreamer 6.65 on an OrangePi RK3399.
+
+1. V4L2_CID_MPEG_VIDEO_H264_I_PERIOD was refused for any non-zero value.
+
+   V4L2 does separate I-period from GOP size: GOP_SIZE is the IDR
+   interval, I_PERIOD the I-frame interval inside an open GOP. The
+   distinction only exists for a stream with non-IDR I-frames, which
+   VEPU2 cannot produce - every intra frame it emits is an IDR - and MPP
+   accordingly has one knob, "rc:gop", for both.
+
+   So refusing I_PERIOD was the more literal reading of the spec, and it
+   cost more than it bought. ustreamer sets I_PERIOD and never GOP_SIZE,
+   so the refusal made the encoder unreachable rather than approximate.
+   Fold it onto the same knob.
+
+   A value of zero is the one case that cannot be folded, and it now
+   means "leave it alone" for both controls. V4L2 reads zero as an
+   open-ended GOP, which this encoder has no mode for, and passing it
+   through breaks more than it approximates: MPP sizes a rate-control
+   ring buffer from it, mpp_data_init_v2() rejects size <= 0, and
+   bits_model_param_init() then fails with "gop_bits init fail gop_len
+   0". kvmd's own default for h264_gop is 0, so this is not a
+   hypothetical value.
+
+2. V4L2_MPEG_VIDEO_H264_PROFILE_CONSTRAINED_BASELINE was rejected.
+
+   It is not an exotic request: it is the profile WebRTC requires, and
+   the one ustreamer asks for unconditionally. Constrained baseline is
+   baseline without FMO, ASO and redundant slices, none of which this
+   encoder emits, so a stream it produces for "baseline" is already
+   conformant constrained baseline. Map both, and map constrained high
+   to high for the same reason - it is high without B-frames, and
+   B-frames are rejected outright a few cases further down.
+
+3. V4L2_CID_MPEG_VIDEO_H264_LEVEL was stored without conversion.
+
+   V4L2 passes an enumerator, MPP wants the level_idc that goes into the
+   SPS, and the two are unrelated numbers: V4L2_MPEG_VIDEO_H264_LEVEL_4_0
+   is 11, and level_idc 11 is level 1.1. So asking for level 4.0 - which
+   is what ustreamer does at 1080p - marked the stream as level 1.1,
+   whose limits it exceeds by two orders of magnitude. A decoder that
+   sizes its buffers from the SPS gets 99 macroblocks and fails.
+
+   This one is silent: nothing rejects it, the stream just carries a
+   level it does not honour. Add the table.
+
+4. V4L2_CID_MPEG_VIDEO_REPEAT_SEQ_HEADER was not implemented, and
+   implementing it is what breaks the deadlock.
+
+   It is the older spelling of PREPEND_SPSPPS_TO_IDR, which this plugin
+   already handles; ustreamer sets the older one. Accepting it is one
+   case label. What matters is the consequence.
+
+   With inline headers the out-of-band header is redundant, so
+   needs_header goes false - and that is what unblocks a client which
+   allocates one buffer per queue, the ordinary V4L2 M2M arrangement and
+   what ustreamer does. The separate-header path takes the single CAPTURE
+   buffer, fills it with the SPS/PPS, and loops back to the top without
+   ever releasing the frame the client queued on OUTPUT. A client that
+   dequeues OUTPUT before CAPTURE - the documented order, since the input
+   buffer is the one it needs back first - then blocks in VIDIOC_DQBUF
+   forever, while the encoder thread waits for a CAPTURE buffer the
+   client cannot return because it is blocked. Neither side reports
+   anything; the stream simply never starts.
+
+   That path stays for the clients that ask for a separate header. It is
+   just no longer what a client gets when it asked for the opposite.
+
+diff --git a/src/libv4l-rkmpp-enc.c b/src/libv4l-rkmpp-enc.c
+index 5b6aaae..f6ffadf 100644
+--- a/src/libv4l-rkmpp-enc.c
++++ b/src/libv4l-rkmpp-enc.c
+@@ -802,7 +802,26 @@ static int rkmpp_enc_streamon(struct rkmpp_enc_context *enc,
+ 			goto err_destroy_mpp;
+ 		}
+ 
+-		enc->needs_header = true;
++		/*
++		 * An out-of-band header is only needed when the bitstream
++		 * does not carry one. With MPP_ENC_HEADER_MODE_EACH_IDR the
++		 * SPS/PPS arrive in front of every IDR, so there is nothing
++		 * to send separately.
++		 *
++		 * This is also what unblocks a client that asks for inline
++		 * headers and allocates one buffer per queue, which is the
++		 * ordinary V4L2 M2M arrangement and what ustreamer does. The
++		 * separate-header path below consumes the CAPTURE buffer
++		 * before it will look at the OUTPUT queue, and then loops
++		 * without releasing the frame the client queued. A client
++		 * that dequeues OUTPUT before CAPTURE - the documented order,
++		 * since the input buffer is the one it needs back first -
++		 * blocks in VIDIOC_DQBUF forever, while this thread waits for
++		 * a CAPTURE buffer the client cannot return because it is
++		 * blocked. Both sides then sit still with no error anywhere.
++		 */
++		enc->needs_header = (enc->header_mode !=
++				     MPP_ENC_HEADER_MODE_EACH_IDR);
+ 	} else if (enc->type == VP8) {
+ 		/* Apply vp8's special configs */
+ 		if (rkmpp_enc_apply_vp8_cfg(enc) < 0) {
+@@ -1019,16 +1038,70 @@ static int rkmpp_enc_h264_convert_profile(int profile)
+ {
+ 	switch (profile) {
+ 	case V4L2_MPEG_VIDEO_H264_PROFILE_BASELINE:
++	/*
++	 * Constrained baseline is baseline minus the three features this
++	 * encoder never emits anyway: no FMO, no ASO, no redundant slices.
++	 * VEPU2 produces a conformant constrained-baseline stream whenever
++	 * it is asked for baseline, so the two map to the same thing here.
++	 * Refusing it is not a safe conservatism either - it is the profile
++	 * WebRTC requires, and the one ustreamer asks for unconditionally.
++	 */
++	case V4L2_MPEG_VIDEO_H264_PROFILE_CONSTRAINED_BASELINE:
+ 		return MPP_H264_PROFILE_BASELINE;
+ 	case V4L2_MPEG_VIDEO_H264_PROFILE_MAIN:
+ 		return MPP_H264_PROFILE_MAIN;
+ 	case V4L2_MPEG_VIDEO_H264_PROFILE_HIGH:
++	/*
++	 * Constrained high is high without B-frames, which is all this
++	 * encoder can do: B-frames are rejected outright further down.
++	 */
++	case V4L2_MPEG_VIDEO_H264_PROFILE_CONSTRAINED_HIGH:
+ 		return MPP_H264_PROFILE_HIGH;
+ 	default:
+ 		return -1;
+ 	}
+ }
+ 
++/*
++ * V4L2 passes an enumerator; MPP wants the level_idc that goes in the SPS.
++ * They are unrelated numbers - V4L2_MPEG_VIDEO_H264_LEVEL_4_0 is 11, and
++ * level_idc 11 is level 1.1 - so handing the enumerator straight through
++ * marks a 1080p stream as level 1.1, whose limits it exceeds by two orders
++ * of magnitude. Decoders that trust the SPS then size their buffers for
++ * 99 macroblocks and fail.
++ */
++static int rkmpp_enc_h264_convert_level(int level)
++{
++	static const int levels[] = {
++		[V4L2_MPEG_VIDEO_H264_LEVEL_1_0] = 10,
++		[V4L2_MPEG_VIDEO_H264_LEVEL_1B]  = 9,
++		[V4L2_MPEG_VIDEO_H264_LEVEL_1_1] = 11,
++		[V4L2_MPEG_VIDEO_H264_LEVEL_1_2] = 12,
++		[V4L2_MPEG_VIDEO_H264_LEVEL_1_3] = 13,
++		[V4L2_MPEG_VIDEO_H264_LEVEL_2_0] = 20,
++		[V4L2_MPEG_VIDEO_H264_LEVEL_2_1] = 21,
++		[V4L2_MPEG_VIDEO_H264_LEVEL_2_2] = 22,
++		[V4L2_MPEG_VIDEO_H264_LEVEL_3_0] = 30,
++		[V4L2_MPEG_VIDEO_H264_LEVEL_3_1] = 31,
++		[V4L2_MPEG_VIDEO_H264_LEVEL_3_2] = 32,
++		[V4L2_MPEG_VIDEO_H264_LEVEL_4_0] = 40,
++		[V4L2_MPEG_VIDEO_H264_LEVEL_4_1] = 41,
++		[V4L2_MPEG_VIDEO_H264_LEVEL_4_2] = 42,
++		[V4L2_MPEG_VIDEO_H264_LEVEL_5_0] = 50,
++		[V4L2_MPEG_VIDEO_H264_LEVEL_5_1] = 51,
++	};
++
++	if (level < 0 || level >= (int)ARRAY_SIZE(levels) || !levels[level])
++		return -1;
++
++	/*
++	 * Level 1b is level_idc 11 with constraint_set3_flag, not level_idc
++	 * 9. MPP's h264e_set_cfg() knows that convention and takes 9 for it,
++	 * which is why this table is not simply "level * 10".
++	 */
++	return levels[level];
++}
++
+ static int rkmpp_enc_s_ext_ctrls(struct rkmpp_enc_context *enc,
+ 				 struct v4l2_ext_controls *ext_ctrls)
+ {
+@@ -1052,12 +1125,6 @@ static int rkmpp_enc_s_ext_ctrls(struct rkmpp_enc_context *enc,
+ 		ctrl = &ext_ctrls->controls[i];
+ 
+ 		switch (ctrl->id) {
+-		case V4L2_CID_MPEG_VIDEO_H264_I_PERIOD:
+-			if (ctrl->value) {
+-				LOGE("not supporting I-period\n");
+-				RETURN_ERR(EINVAL, -1);
+-			}
+-			break;
+ 		case V4L2_CID_MPEG_VIDEO_H264_LOOP_FILTER_MODE:
+ 			if (ctrl->value !=
+ 			    V4L2_MPEG_VIDEO_H264_LOOP_FILTER_MODE_ENABLED) {
+@@ -1069,6 +1136,13 @@ static int rkmpp_enc_s_ext_ctrls(struct rkmpp_enc_context *enc,
+ 		case V4L2_CID_MPEG_VIDEO_H264_8X8_TRANSFORM:
+ 			/* Automatically configured */
+ 			break;
++		/*
++		 * Two spellings of one request. PREPEND_SPSPPS_TO_IDR is the
++		 * H.264-specific control; REPEAT_SEQ_HEADER predates it and
++		 * is what ustreamer sets. Both mean "put the parameter sets
++		 * in front of every IDR", which is MPP_ENC_HEADER_MODE_EACH_IDR.
++		 */
++		case V4L2_CID_MPEG_VIDEO_REPEAT_SEQ_HEADER:
+ 		case V4L2_CID_MPEG_VIDEO_PREPEND_SPSPPS_TO_IDR:
+ 			if (ctrl->value)
+ 				enc->header_mode = MPP_ENC_HEADER_MODE_EACH_IDR;
+@@ -1077,6 +1151,16 @@ static int rkmpp_enc_s_ext_ctrls(struct rkmpp_enc_context *enc,
+ 
+ 			LOGV(1, "header mode: %d\n", ctrl->value);
+ 
++			/*
++			 * Inline headers make the out-of-band one redundant,
++			 * and emitting both would put a second copy of the
++			 * SPS/PPS in front of the first IDR. See the comment
++			 * in rkmpp_enc_streamon() for why this matters far
++			 * more than a duplicated header.
++			 */
++			enc->needs_header = (enc->header_mode !=
++					     MPP_ENC_HEADER_MODE_EACH_IDR);
++
+ 			if (ctx->mpp_streaming &&
+ 			    rkmpp_enc_apply_rc_cfg(enc) < 0) {
+ 				LOGE("failed to apply header mode\n");
+@@ -1176,7 +1260,15 @@ static int rkmpp_enc_s_ext_ctrls(struct rkmpp_enc_context *enc,
+ 			}
+ 			break;
+ 		case V4L2_CID_MPEG_VIDEO_H264_LEVEL:
+-			enc->h264.level = ctrl->value;
++			enc->h264.level =
++				rkmpp_enc_h264_convert_level(ctrl->value);
++			if (enc->h264.level < 0) {
++				enc->h264.level = 40;
++				LOGE("unsupported h264 level: %d\n",
++				     ctrl->value);
++				RETURN_ERR(EINVAL, -1);
++			}
++
+ 			LOGV(1, "h264 level: %d\n", enc->h264.level);
+ 
+ 			if (ctx->mpp_streaming &&
+@@ -1223,7 +1315,46 @@ static int rkmpp_enc_s_ext_ctrls(struct rkmpp_enc_context *enc,
+ 				RETURN_ERR(errno, -1);
+ 			}
+ 			break;
++		/*
++		 * I-period and GOP size are one knob on this encoder.
++		 *
++		 * V4L2 separates them: GOP_SIZE is the IDR interval and
++		 * H264_I_PERIOD is the I-frame interval within an open GOP,
++		 * so they differ only for a stream with non-IDR I-frames.
++		 * VEPU2 has no such mode - every intra frame it produces is
++		 * an IDR - and MPP exposes one control, "rc:gop", for both.
++		 *
++		 * So the two V4L2 controls collapse onto rc:gop. Refusing
++		 * I_PERIOD was the more honest reading of the spec, but it
++		 * cost more than it bought: ustreamer sets only I_PERIOD,
++		 * never GOP_SIZE, and treats a failed control as fatal, so
++		 * the refusal made the encoder unreachable rather than
++		 * merely approximate.
++		 */
++		case V4L2_CID_MPEG_VIDEO_H264_I_PERIOD:
+ 		case V4L2_CID_MPEG_VIDEO_GOP_SIZE:
++			/*
++			 * Zero means "leave it alone", not "zero".
++			 *
++			 * V4L2 reads a GOP/I-period of 0 as an open-ended one -
++			 * only the very first frame is an IDR - and this
++			 * encoder has no such mode. Passing it through is not
++			 * a harmless approximation either: MPP's rate
++			 * controller sizes a ring buffer from it, and
++			 * mpp_data_init_v2() rejects size <= 0, so
++			 * bits_model_param_init() fails with "gop_bits init
++			 * fail gop_len 0" and the encoder comes up without a
++			 * working rate controller.
++			 *
++			 * kvmd's default for h264_gop happens to be 0, which
++			 * is how a value nobody typed reaches us.
++			 */
++			if (!ctrl->value) {
++				LOGV(1, "gop size 0: keeping %d\n",
++				     enc->gop_size);
++				break;
++			}
++
+ 			enc->gop_size = ctrl->value;
+ 			LOGV(1, "gop size: %d\n", enc->gop_size);
+ 

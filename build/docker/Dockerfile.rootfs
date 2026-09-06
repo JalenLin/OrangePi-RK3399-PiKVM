@@ -1,0 +1,279 @@
+# Arch Linux ARM aarch64 rootfs with PiKVM installed, assembled the way
+# pi-builder does it: unpack the ALARM tarball into a scratch image and run
+# pacman inside it under qemu-user via binfmt.
+#
+# Three stages. "base" is the bare ALARM system with pacman working; "rkmpp"
+# is a throwaway builder for the Rockchip MPP userspace; "final" is the image
+# we ship. The split exists so base-devel, cmake and meson - roughly half a
+# gigabyte of build tooling - never reach the SD card.
+FROM scratch AS base
+
+# Docker auto-extracts .tar.gz for ADD. The tarball is staged into the build
+# context by build-rootfs.sh.
+ADD ArchLinuxARM-aarch64-latest.tar.gz /
+
+ARG PIKVM_REPO_URL
+ARG TARGET_HOSTNAME
+ARG TARGET_TIMEZONE
+ARG TARGET_LOCALE
+
+SHELL ["/bin/bash", "-eo", "pipefail", "-c"]
+
+# pacman >= 7 sandboxes its downloads with Landlock. We are running aarch64
+# pacman on an x86_64 host through qemu-user, which does not carry those
+# syscalls through, so the sandbox cannot initialise and every transaction
+# fails with "Landlock is not supported by the kernel". Turning it off is safe
+# here precisely because this already runs inside a throwaway container.
+RUN sed -i '/^\[options\]/a DisableSandbox' /etc/pacman.conf
+
+# ALARM's shipped keyring is routinely older than the packages on the mirror,
+# so refresh the keyring before anything else tries to verify a signature.
+RUN pacman-key --init \
+ && pacman-key --populate archlinuxarm \
+ && pacman -Sy --noconfirm --needed archlinuxarm-keyring \
+ && pacman-key --populate archlinuxarm
+
+# SigLevel=Never for this repo only: PiKVM signs its packages, but their key
+# is not in any keyring we can populate from here, and pacman's prefix syntax
+# has no "accept an untrusted signature" middle ground worth the complexity.
+# The repo is fetched over HTTPS from files.pikvm.org, which is the same trust
+# root the official PiKVM installer relies on.
+RUN printf '\n[pikvm]\nServer = %s\nSigLevel = Never\n' \
+        "${PIKVM_REPO_URL}" >> /etc/pacman.conf
+
+
+# =============================================================================
+# Stage: rkmpp - Rockchip MPP + the libv4l plugin that fronts it as V4L2 M2M
+# =============================================================================
+# Entirely userspace: no kernel change, nothing here alters how the system
+# boots. It is an experiment to be run on the board, not a supported path.
+#
+# The goal is hardware H.264, which is what kvmd's WebRTC path needs. ustreamer
+# already speaks generic V4L2 M2M H.264, so if MPP can be made to look like a
+# V4L2 M2M device, WebRTC works with no fork of anything. That is what
+# libv4l-rkmpp attempts.
+#
+# Everything installs under /opt/rkmpp rather than over the system libraries,
+# so it cannot shadow a system library by accident and removing it is one
+# rm -rf. Both codecs the KVM runs on live here: ustreamer reaches VEPU2
+# through libv4l-rkmpp, for MJPEG and for H.264.
+FROM base AS rkmpp
+
+ARG V4L_UTILS_VER=1.32.0
+ENV PREFIX=/opt/rkmpp
+
+RUN pacman -Syu --noconfirm --needed \
+        base-devel git cmake meson ninja pkgconf curl \
+    && rm -rf /var/cache/pacman/pkg/*
+
+# Rockchip's own media library. This is the piece that definitely drives the
+# RK3399 encoder - it is the path the vendor SDK and gstreamer-rockchip use.
+# BUILD_TEST gives us mpi_enc_test, which is the ground truth for "does this
+# board's H.264 encoder work at all", independent of everything above it.
+RUN git clone --depth 1 -b develop https://github.com/rockchip-linux/mpp /tmp/mpp \
+ && cmake -S /tmp/mpp -B /tmp/mpp/build \
+        -DCMAKE_BUILD_TYPE=Release \
+        -DCMAKE_INSTALL_PREFIX="${PREFIX}" \
+        -DBUILD_TEST=ON \
+ && cmake --build /tmp/mpp/build -j"$(nproc)" \
+ && cmake --install /tmp/mpp/build \
+ && rm -rf /tmp/mpp
+
+# libv4l-rkmpp needs a libv4l2 that can forward mmap() to a plugin; stock
+# libv4l2 cannot, and an M2M encoder is useless without mapped buffers. Hence
+# a private, patched copy of v4l-utils - same version Arch ships, so the
+# patched libv4l2 stays ABI-compatible with everything else on the image.
+RUN curl -fL -o /tmp/v4l-utils.tar.xz \
+        "https://linuxtv.org/downloads/v4l-utils/v4l-utils-${V4L_UTILS_VER}.tar.xz" \
+ && mkdir -p /tmp/v4l && tar -xf /tmp/v4l-utils.tar.xz -C /tmp/v4l --strip-components=1 \
+ && curl -fL -o /tmp/mmap.patch \
+        "https://raw.githubusercontent.com/JeffyCN/meta-rockchip/release-1.3.0_20200915/recipes-multimedia/v4l2apps/v4l-utils/0001-libv4l2-Support-mmap-to-libv4l-plugin.patch" \
+ && patch -d /tmp/v4l -p1 < /tmp/mmap.patch \
+ && meson setup /tmp/v4l/build /tmp/v4l \
+        --prefix="${PREFIX}" --buildtype=release -Dauto_features=disabled \
+ && meson compile -C /tmp/v4l/build \
+ && meson install -C /tmp/v4l/build \
+ && rm -rf /tmp/v4l /tmp/v4l-utils.tar.xz
+
+# The plugin itself. Built against the patched libv4l2 and our MPP, and
+# installed into ${PREFIX}/lib/libv4l/plugins where that libv4l2 looks.
+COPY patches/libv4l-rkmpp/ /tmp/rkmpp-patches/
+RUN git clone --depth 1 https://github.com/JeffyCN/libv4l-rkmpp /tmp/rkmpp \
+ && for p in /tmp/rkmpp-patches/*.patch; do \
+        echo ":: applying $(basename "$p")"; \
+        patch -d /tmp/rkmpp -p1 --fuzz=0 < "$p" || exit 1; \
+    done \
+ && PKG_CONFIG_PATH="${PREFIX}/lib/pkgconfig:${PREFIX}/lib64/pkgconfig" \
+    meson setup /tmp/rkmpp/build /tmp/rkmpp \
+        --prefix="${PREFIX}" --buildtype=release \
+ && meson compile -C /tmp/rkmpp/build \
+ && meson install -C /tmp/rkmpp/build \
+ && rm -rf /tmp/rkmpp /tmp/rkmpp-patches
+
+# =============================================================================
+# Stage: final
+# =============================================================================
+FROM base AS final
+
+# ARG values do not cross a stage boundary, so the ones this stage consumes
+# have to be named again here.
+ARG TARGET_HOSTNAME
+ARG TARGET_TIMEZONE
+ARG TARGET_LOCALE
+
+# wireless-regdb is not optional here even though nothing depends on it.
+# cfg80211 asks the firmware loader for regulatory.db on init, and without it
+# the kernel is stuck on the built-in world domain "00", where the 5 GHz DFS
+# range (channels 52-144, 5250-5330 and 5490-5730 MHz) is scanned by nobody:
+# an AP on channel 108 is simply invisible. `iw reg set` cannot help - with no
+# database loaded there is nothing to set. See also CONFIG_CFG80211=m in
+# config/kernel-fragments/pikvm.config, which is the other half of this.
+#
+# iw earns its place as the only way to see any of that from the board. The
+# image ships wpa_supplicant, which can scan, but it cannot show the phy's
+# channel list or the regulatory domain in force, and those are exactly the
+# two things you need when 5 GHz "does not work".
+RUN pacman -Syu --noconfirm --needed \
+        base \
+        systemd systemd-sysvcompat \
+        openssh sudo \
+        nano vim less \
+        iproute2 iputils net-tools \
+        dhcpcd wpa_supplicant \
+        wireless-regdb iw \
+        v4l-utils \
+        usbutils i2c-tools \
+        python python-pip \
+    && rm -rf /var/cache/pacman/pkg/*
+
+# kvmd pulls ustreamer, nginx, python deps and the rest of the stack.
+#
+# It also hard-depends on raspberrypi-io-access, raspberrypi-utils and
+# janus-gateway-pikvm. The first two are inert rather than harmful: kvmd's ATX
+# GPIO backend uses libgpiod, not raspberrypi-io-access, so the cost is some
+# wasted space and any kvmd health check that shells out to vcgencmd logging a
+# failure. janus is no longer in that category - this image publishes an H.264
+# memsink now, and the enable below turns janus on for the variant that does.
+RUN pacman -S --noconfirm --needed \
+        kvmd \
+        kvmd-webterm \
+    && rm -rf /var/cache/pacman/pkg/*
+
+COPY --from=rkmpp /opt/rkmpp /opt/rkmpp
+
+RUN ln -sf "/usr/share/zoneinfo/${TARGET_TIMEZONE}" /etc/localtime \
+ && echo "${TARGET_LOCALE} UTF-8" > /etc/locale.gen \
+ && locale-gen \
+ && echo "LANG=${TARGET_LOCALE}" > /etc/locale.conf \
+ && echo "${TARGET_HOSTNAME}" > /etc/hostname
+
+# Our board overlay lands on top of whatever the packages installed, so it
+# wins over the upstream defaults it replaces.
+#
+# Staged, normalised, then copied with cp - not COPYed straight to /.
+#
+# Two problems with `COPY overlay/ /`, both rooted in the same thing: git does
+# not record file modes beyond the executable bit, so what lands in a checkout
+# is whatever the cloner's umask produced, and COPY carries that verbatim onto
+# the card.
+#
+# 1. COPY stamps the source directory's mode onto every destination directory
+#    the tree passes through, *including ones that already exist*. A checkout
+#    made under the common umask of 002 has 0775 directories, so this left
+#    /usr, /etc, /usr/lib, /etc/kvmd, /etc/systemd/system and /etc/sudoers.d
+#    group-writable on the card. Owner and group stayed root, so it was not an
+#    escalation, but it is wrong and sshd is strict about it:
+#
+#      sshd-session: error: Unsafe AuthorizedKeysCommand "/usr/bin/userdbctl":
+#                           bad ownership or modes for directory /usr
+#
+#    `pacman -Qkk filesystem sudo systemd` on the running board listed every
+#    one of them as a permissions mismatch.
+#
+# 2. The overlay's own files inherited the same umask - most arrived 0664
+#    rather than 0644, and the scripts 0775 rather than 0755.
+#
+# So the staging copy is normalised first - 0755 for directories and anything
+# executable, 0644 for everything else, with the two deliberate exceptions
+# spelled out, since sudo refuses to read a drop-in that is not 0440 and the
+# EDID blobs are read-only on purpose.
+#
+# Then `tar --no-overwrite-dir`, which is the only one of these that gets the
+# split right: it keeps the metadata of directories that already exist and
+# applies the archive's only to ones it creates. `cp -a` is not a substitute -
+# measured, it is just as destructive as COPY, and worse, because the mode of
+# the *source* root lands on / itself:
+#
+#   before: / = 555  /etc = 750
+#   cp -a : / = 777  /etc = 777
+#   tar   : / = 555  /etc = 750
+COPY overlay/ /tmp/overlay/
+RUN cd /tmp/overlay \
+ && find . -type d              -exec chmod 0755 {} + \
+ && find . -type f -perm -u+x   -exec chmod 0755 {} + \
+ && find . -type f ! -perm -u+x -exec chmod 0644 {} + \
+ && chmod 0440 etc/sudoers.d/* \
+ && chmod 0444 etc/kvmd/*.hex \
+ && tar -cf - . | tar -C / -xf - --no-overwrite-dir \
+ && cd / && rm -rf /tmp/overlay
+
+# systemd-homed, systemd-userdbd and systemd-nsresourced have nothing to do
+# here: every account on this image is a plain /etc/passwd entry created by
+# pacman, and no service asks for a user record. They are socket-activated, so
+# disabling is not enough - masking is what actually keeps them from starting.
+# The visible cost of leaving them was one failed userdbctl fork per SSH login;
+# see overlay/etc/ssh/sshd_config.d/20-systemd-userdb.conf.
+RUN systemctl mask \
+        systemd-homed.service \
+        systemd-userdbd.service \
+        systemd-userdbd.socket \
+        systemd-nsresourced.service \
+        systemd-nsresourced.socket
+
+RUN systemctl enable \
+        sshd \
+        systemd-networkd \
+        systemd-resolved \
+        kvmd \
+        kvmd-otg \
+        kvmd-nginx \
+        kvmd-vnc \
+        kvmd-webterm \
+        kvmd-tc358743 \
+        pikvm-expand-msd
+
+# WebRTC, and only on the variant that can feed it.
+#
+# Both of these consume the H.264 memsink ustreamer publishes: kvmd-media
+# serves it over /api/media/ws, kvmd-janus over WebRTC. Neither has a
+# software fallback, because ustreamer has no software H.264 encoder - the
+# sink exists on this image only because MPP's VEPU2 does.
+#
+# The sink is always present now that /opt/rkmpp is unconditional, so these
+# are enabled unconditionally too. This used to be guarded by a marker file
+# that told a variant without MPP apart from one with it; that variant is
+# gone - it could only do software MJPEG, which cost three of six cores and
+# no WebRTC at all, so nobody would ever have flashed it.
+RUN systemctl enable kvmd-media kvmd-janus
+
+# Nothing here retargets janus's audio capture, on purpose. kvmd ships
+# /etc/kvmd/janus/janus.plugin.ustreamer.jcfg asking for "hw:tc358743,0", and
+# patches/kernel-6.12/0015 names the card it creates "tc358743" so that the
+# stock config is already correct. The alternative - name the card for the
+# TC358749 actually fitted, and sed this file - was rejected: it is a pacman
+# backup file, so an upstream change to it arrives as a .pacnew, and merging
+# that the usual way would silently drop the edit and take WebRTC audio with
+# it. See the comment above the hdmiin-sound node in patch 0015.
+
+ARG TARGET_ROOT_PASSWORD
+
+# The ALARM tarball ships an "alarm" user; drop it. Root keeps a known
+# password rather than being locked: a locked root on a headless board means
+# no serial login and no SSH, i.e. no way to debug it at all. Same default as
+# PiKVM upstream, and the same expectation that you change it.
+RUN userdel -r alarm 2>/dev/null || true
+RUN echo "root:${TARGET_ROOT_PASSWORD}" | chpasswd
+RUN sed -i 's/^#\?PermitRootLogin.*/PermitRootLogin yes/' /etc/ssh/sshd_config \
+ && grep -q '^PermitRootLogin yes' /etc/ssh/sshd_config
+
+RUN rm -f /etc/machine-id /var/lib/dbus/machine-id

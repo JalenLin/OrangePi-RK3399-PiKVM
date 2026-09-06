@@ -1,0 +1,65 @@
+# Adapted from kvmd-platform-v2-hdmi-rpi4.
+#
+# The capture chain differs from a Pi only in its receiving end: where the Pi
+# has Unicam at fe801000.csi, the RK3399 feeds the bridge into ISP0 at
+# ff910000. Everything downstream of the resulting node is identical, so the
+# rest of these rules are unchanged from upstream.
+#
+# The mainpath node is the one that can carry YUV straight through with the
+# resizer in bypass; the selfpath is deliberately not matched.
+KERNEL=="video[0-9]*", SUBSYSTEM=="video4linux", KERNELS=="ff910000.rkisp1", ATTR{name}=="rkisp1_mainpath", GROUP="kvmd", SYMLINK+="kvmd-video", TAG+="systemd"
+KERNEL=="video[0-9]*", SUBSYSTEM=="video4linux", KERNELS=="ff910000.rkisp1", ATTR{name}=="rkisp1-mainpath", GROUP="kvmd", SYMLINK+="kvmd-video", TAG+="systemd"
+
+KERNEL=="hidg0", GROUP="kvmd", SYMLINK+="kvmd-hid-keyboard"
+KERNEL=="hidg1", GROUP="kvmd", SYMLINK+="kvmd-hid-mouse"
+KERNEL=="hidg2", GROUP="kvmd", SYMLINK+="kvmd-hid-mouse-alt"
+
+# GPIO banks, named by the bank number in the SoC manual rather than by the
+# order their chardevs happened to be created in.
+#
+# This matters more than it looks. kvmd's ATX driver takes a path to a
+# gpiochip and line numbers within it, and there is nothing in either that
+# says which bank was meant - so if /dev/gpiochipN ever stops being bank N,
+# the same config silently drives different pins. Nothing guarantees that
+# mapping: it is probe order. Matching the register address instead makes the
+# name mean the bank, permanently.
+#
+# There is deliberately no bare /dev/kvmd-gpio. kvmd's default device path is
+# exactly that, so leaving one would let a config that names no bank open
+# whichever chip the symlink happened to point at. Without it, that config
+# fails at startup with ENOENT, which is the correct outcome.
+#
+# Bank 0 gets a symlink for completeness, not for use: it is the PMU bank,
+# fourteen pins, 1.8 V only. See docs/hardware.md.
+SUBSYSTEM=="gpio", KERNEL=="gpiochip*", KERNELS=="ff720000.gpio", SYMLINK+="kvmd-gpio0"
+SUBSYSTEM=="gpio", KERNEL=="gpiochip*", KERNELS=="ff730000.gpio", SYMLINK+="kvmd-gpio1"
+SUBSYSTEM=="gpio", KERNEL=="gpiochip*", KERNELS=="ff780000.gpio", SYMLINK+="kvmd-gpio2"
+SUBSYSTEM=="gpio", KERNEL=="gpiochip*", KERNELS=="ff788000.gpio", SYMLINK+="kvmd-gpio3"
+SUBSYSTEM=="gpio", KERNEL=="gpiochip*", KERNELS=="ff790000.gpio", SYMLINK+="kvmd-gpio4"
+
+# The HDMI receiver's own subdev. PiKVM's EDID loader needs it: on a Pi the
+# tc358743 *is* the capture device, so upstream's kvmd-tc358743.service points
+# VIDIOC_S_EDID at /dev/kvmd-video. Here /dev/kvmd-video is the rkisp1
+# mainpath, which has no EDID ioctls at all (G_EDID -> ENOTTY), and the bridge
+# sits two hops upstream as a subdev whose number is not stable across boots.
+KERNEL=="v4l-subdev[0-9]*", SUBSYSTEM=="video4linux", KERNELS=="1-001f", ATTR{name}=="*tc35874x*", SYMLINK+="kvmd-video-bridge", TAG+="systemd"
+
+# Rockchip MPP, the only way to reach this SoC's H.264 encoder. The driver
+# creates the node 0600 root:root, which is right for a device nobody is
+# supposed to use yet but wrong the moment ustreamer needs it: ustreamer runs
+# as kvmd, and kvmd is in "video". Nothing opens this today - there is no
+# encoder path wired up (see docs/roadmap.md) - but a missing rule here fails
+# as a bare EACCES from open(), which is an unpleasant thing to debug later.
+KERNEL=="mpp_service", SUBSYSTEM=="mpp_class", GROUP="video", MODE="0660"
+
+# DMA-BUF heaps. Rockchip MPP allocates its encoder buffers from these, and
+# the kernel creates them 0600 root:root - correct for a facility nothing was
+# using, wrong once the encoder runs as kvmd. Without this the failure is
+# indirect and hard to read: MPP falls through every allocator it knows,
+# reports "failed to use mpp drm buf group", libv4l-rkmpp's plugin_init()
+# gives up, and the first symptom ustreamer sees is EINVAL from an unrelated
+# VIDIOC_S_CTRL - a control error standing in for a permission error.
+#
+# "video" is the group ustreamer already needs for the capture device and for
+# /dev/mpp_service, so this grants nothing it did not already have.
+SUBSYSTEM=="dma_heap", KERNEL=="system*", GROUP="video", MODE="0660"

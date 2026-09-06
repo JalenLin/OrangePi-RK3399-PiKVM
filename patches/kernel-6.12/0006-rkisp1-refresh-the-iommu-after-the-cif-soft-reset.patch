@@ -1,0 +1,87 @@
+diff --git a/drivers/media/platform/rockchip/isp1/dev.c b/drivers/media/platform/rockchip/isp1/dev.c
+index f7b56871a..4db629600 100644
+--- a/drivers/media/platform/rockchip/isp1/dev.c
++++ b/drivers/media/platform/rockchip/isp1/dev.c
+@@ -1091,7 +1091,8 @@ static int rkisp1_plat_probe(struct platform_device *pdev)
+ 	if (ret < 0)
+ 		goto err_unreg_media_dev;
+ 
+-	if (!is_iommu_enable(dev)) {
++	isp_dev->is_mmu = is_iommu_enable(dev);
++	if (!isp_dev->is_mmu) {
+ 		ret = of_reserved_mem_device_init(dev);
+ 		if (ret)
+ 			v4l2_warn(v4l2_dev,
+diff --git a/drivers/media/platform/rockchip/isp1/dev.h b/drivers/media/platform/rockchip/isp1/dev.h
+index 0d0d6fd52..f646aa9b2 100644
+--- a/drivers/media/platform/rockchip/isp1/dev.h
++++ b/drivers/media/platform/rockchip/isp1/dev.h
+@@ -150,6 +150,9 @@ struct rkisp1_device {
+ 	struct rkisp1_dmarx_device dmarx_dev;
+ 	struct rkisp1_pipeline pipe;
+ 	struct iommu_domain *domain;
++	/* whether an IOMMU is attached; see the CIF_IRCL reset in
++	 * rkisp1_isp_stop() for why we have to remember this */
++	bool is_mmu;
+ 	enum rkisp1_isp_ver isp_ver;
+ 	const unsigned int *clk_rate_tbl;
+ 	int num_clk_rate_tbl;
+diff --git a/drivers/media/platform/rockchip/isp1/rkisp1.c b/drivers/media/platform/rockchip/isp1/rkisp1.c
+index 3ca5d8bdd..048222698 100644
+--- a/drivers/media/platform/rockchip/isp1/rkisp1.c
++++ b/drivers/media/platform/rockchip/isp1/rkisp1.c
+@@ -42,6 +42,7 @@
+ #include <linux/interrupt.h>
+ #include <linux/rk-preisp.h>
+ #include <linux/iommu.h>
++#include <soc/rockchip/rockchip_iommu.h>
+ #include <media/v4l2-event.h>
+ #include <media/media-entity.h>
+ 
+@@ -763,6 +764,46 @@ static int rkisp1_isp_stop(struct rkisp1_device *dev)
+ 		/* abnormal case, in irq function */
+ 		writel(CIF_IRCL_CIF_SW_RST, base + CIF_IRCL);
+ 	}
++
++	/*
++	 * Refresh the IOMMU after the reset.
++	 *
++	 * CIF_IRCL_CIF_SW_RST resets the whole CIF block, and on this SoC that
++	 * includes the ISP's own MMU: the reset clears RK_MMU_DTE_ADDR, turns
++	 * paging off and masks the MMU interrupts. Nothing ever turns it back
++	 * on, so from the second stream-on after boot onwards the MI writes to
++	 * IOVAs that no longer translate.
++	 *
++	 * The failure is silent and looks nothing like a DMA fault. Buffers are
++	 * dequeued at the full frame rate with bytesused set, the ISP raises its
++	 * usual ~2.3 interrupts per frame, every ISP, MI, D-PHY and bridge
++	 * register reads exactly as it does on a working stream, and ISP_ERR is
++	 * 0 - the frames just come back entirely zero, because the writes go
++	 * nowhere and the MMU interrupts that would have reported it are masked
++	 * by the same reset. Measured on the board:
++	 *
++	 *   stream 1: nonzero 4147200  MI_STATUS 0x1  DTE 0x031aa000  STATUS 0x19
++	 *   stream 2: nonzero 0        MI_STATUS 0x0  DTE 0x00000000  STATUS 0x18
++	 *
++	 * (RK_MMU_STATUS bit 0 is PAGING_ENABLED.) Restoring DTE and re-enabling
++	 * paging by hand between the two makes stream 2 capture perfectly, and
++	 * skipping it again breaks stream 3 - so this is the whole of it.
++	 *
++	 * Every other Rockchip media driver in this tree already does exactly
++	 * this after the same register write, with the same comment - see
++	 * rkisp_soft_reset() in ../isp/hw.c, and ../ispp, ../cif, ../vpss,
++	 * ../fec, ../aiisp. isp1 is the one that was missed.
++	 *
++	 * Only in process context: rockchip_iommu_enable() polls the MMU status
++	 * with readx_poll_timeout(), which sleeps. The in_interrupt() branch
++	 * above is the error path taken from the ISR, and a stream started after
++	 * one of those will still come back blank.
++	 */
++	if (dev->is_mmu && !in_interrupt()) {
++		udelay(10);
++		rockchip_iommu_disable(dev->dev);
++		rockchip_iommu_enable(dev->dev);
++	}
+ 	if (dev->isp_ver == ISP_V12 || dev->isp_ver == ISP_V13) {
+ 		writel(0, base + CIF_ISP_CSI0_CSI2_RESETN);
+ 		writel(0, base + CIF_ISP_CSI0_CTRL0);
