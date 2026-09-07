@@ -341,6 +341,29 @@ console works perfectly. It is only the adapter's TX into the board that is
 out of spec, and it will usually still be readable. Working is not evidence of
 being in spec here.
 
+**An RS-232 transceiver is the same hazard, and a quieter one**, because its
+logic level is whatever you fed its VCC. An SP3232E powered from header pin 2
+— 5 V, if the header follows the Raspberry Pi labelling the rest of it does —
+puts 0–5 V on its TTL output and into this pin, exactly like a 5 V USB-TTL
+board. The fix is one wire: the part runs from 3.0 to 5.5 V, so move its VCC
+to a 3.3 V pin. Meter the pin first rather than trusting the silkscreen.
+
+What this looks like in practice, and why it goes unnoticed for a long time:
+UART idle is logic high, so the pin sits at the adapter's high level
+continuously, not only during traffic. Above roughly VDD_IO + 0.5 V the pad's
+ESD clamp conducts, and the current — set by the driver's output impedance,
+single-digit mA for a CMOS output — is injected into `vcc_3v0`. That rail
+carries the whole `gpio1830`, `bt656` and `pmu1830` domains here, so it sinks
+a few mA without moving; on a board where it were lightly loaded, the symptom
+would be the rail rising and unrelated things misbehaving. So this is a
+lifetime and reliability question rather than a "the board stops working"
+question, which is precisely why it survives review.
+
+Two things are **not** known here and would settle it: whether the board has
+series resistors on the debug UART lines, which would make all of the above
+moot, and whether `vcc_3v0` actually moves with an adapter attached. The
+vendor schematic answers the first; a meter answers the second.
+
 ### What is actually free
 
 Everything on the header is bank `gpio2` except SPI1/I2C4 (`gpio1`), the

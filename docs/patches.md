@@ -680,12 +680,16 @@ because the header carries TX, RX and ground and nothing else. Anything longer
 than a keystroke — a pasted command, most obviously — is a burst. 115200 has
 thirteen times the slack and needs no flow control to survive one.
 
-The other thing worth ruling out is the adapter. An RS-232 transceiver in the
-path — the common USB-to-RS232 into an RS-232-to-TTL board rig — is specified
-to 235 kbps in the SP3232E/MAX3232 family, so 1500000 is well outside its
-sheet. That has not been measured here, and at least one person reports that
-rig working at 1500000, so treat it as the first thing to swap out rather than
-as the explanation.
+The other thing worth ruling out is the adapter, and there is one data point
+worth having. An RS-232 transceiver in the path — the common USB-to-RS232 into
+an RS-232-to-TTL board rig — is specified to 235 kbps in the SP3232E/MAX3232
+family, so 1500000 is well outside its sheet. It has not been measured here,
+but the two rigs did behave differently at that rate: straight USB-to-TTL got
+1878 of 1900 bytes into the board, while the RS-232 chain could not get a
+single command into U-Boot. Both were 5 V, so the drive level is not what
+separates them; the RS-232 hop is the only difference left. Treat it as the
+first thing to swap out at 1500000, and note that none of it applies at
+115200, where every rig tried here has been flawless in both directions.
 
 This supersedes an earlier note in this tree that said the board "corrupts on
 write" at 1500000. It does not. The bytes arrive intact — no framing errors,
