@@ -8,12 +8,68 @@ binaries. `make clean-docker` removes both the images and the handler.
 ## What you need
 
 * Docker, and a user who can run it
-* ~25 GB free: upstream checkouts are most of it (`sources/` is ~11 GB
-  with both kernel tracks fetched, `.cache/` 1.6 GB), plus a 6.7 GB image
+* ~15 GB free for a default build, ~25 GB if you also fetch the dead 4.4
+  track: upstream checkouts are most of it (`sources/` is 5.8 GB for `rk612`
+  alone and 11 GB with both, `.cache/` 1.6 GB), plus a 6.7 GB image
+* A network connection for the first build — see below
 * An x86_64 host. Cross-compilation is the only path that has been run.
 
 No cross-toolchain, no `mkimage`, no `parted` on the host — those live in
 `opi-pikvm/kbuild:20.04`, built from `build/docker/Dockerfile.kbuild`.
+
+## Where the sources come from
+
+You do not fetch anything by hand, and `sources/` is deliberately not in the
+repository — it is 5.8 GB of other people's git history. The build clones what
+it needs, on demand, the first time a step needs it. A first build therefore
+needs network access; later builds do not.
+
+| `sources/` | from | branch | size | needed by |
+|---|---|---|---|---|
+| `kernel-rk612` | `rockchip-linux/kernel` | `develop-6.12` | 3.8 GB | `make kernel` |
+| `toolchain` | `orangepi-xunlong/toolchain` | `aarch64-linux-gnu-6.3` | 869 MB | `make uboot` |
+| `external-bsp` | `orangepi-xunlong/OrangePiRK3399_external` | `orangepi-rk3399_v1.4` | 834 MB | `make uboot` |
+| `uboot-bsp` | `orangepi-xunlong/OrangePiRK3399_uboot` | `master` | 261 MB | `make uboot` |
+| `kernel-bsp` | `orangepi-xunlong/OrangePiRK3399_kernel` | `master` | 5.1 GB | only `KERNEL_TRACK=bsp` |
+
+`external-bsp` is Rockchip's `rkbin` blob repository — the DDR init and BL31
+that end up in `idbloader.img` and `trust.img`. Rockchip's `make.sh` looks for
+it at `../external/rkbin` relative to the U-Boot tree, which is why
+`build-uboot.sh` leaves a `sources/external` symlink pointing at it, and why
+`sources/` is laid out this way rather than however you might prefer.
+
+The `toolchain` checkout is Linaro GCC 6.3, and it is only there because the
+vendor U-Boot wants it. The 6.12 kernel is built with the distro cross-gcc
+inside the container instead — 6.3 is too old for it and fails on
+`-Wattribute-warning`.
+
+Three more things are downloaded by `make rootfs`, into the Docker build
+rather than into `sources/`: Rockchip's `mpp`, `linuxtv.org`'s v4l-utils
+tarball with a mmap patch from `JeffyCN/meta-rockchip`, and
+`JeffyCN/libv4l-rkmpp`. The Arch Linux ARM rootfs tarball is cached in
+`.cache/`, and PiKVM's own packages come from `files.pikvm.org` during the
+build. All of the URLs are in `config/board.conf` and
+`build/docker/Dockerfile.rootfs`.
+
+### Two things worth knowing about the checkouts
+
+**They are branch tips, not commits.** `fetch_repo` in
+`build/scripts/common.sh` does `git clone --depth 1 -b <branch>`, so what you
+get is whatever that branch pointed at on the day you cloned. This tree was
+built against `kernel-rk612` at `470f9dccb`. Nothing enforces that, so two
+machines cloning a month apart can be building different code — if that
+matters to you, check out a specific commit yourself after the first fetch.
+
+**They are never updated.** `fetch_repo` skips any directory that already has
+a `.git`, so a checkout is fetched exactly once and then left alone forever.
+To move to newer upstream code, delete the directory and let the next build
+re-clone it.
+
+**Anything you edit in `sources/` by hand will be destroyed.** Before applying
+patches, the build resets the tree with `git checkout HEAD -- .` — it does not
+try to work out what is already applied, because two patches touching the same
+lines make that unreliable. Turn your change into a patch first; see *Changing
+things* below.
 
 ## The four steps
 

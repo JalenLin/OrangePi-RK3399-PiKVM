@@ -71,7 +71,7 @@ overlay/                       files grafted into the rootfs (kvmd config, udev,
 patches/kernel-6.12/           kernel patches, applied in filename order
 patches/libv4l-rkmpp/          userspace patches, applied inside the rootfs build
 docs/logs/                     a known-good boot log to diff against
-sources/                       upstream checkouts (gitignored)
+sources/                       upstream checkouts - cloned by the build, gitignored
 output/                        build products (gitignored)
 ```
 
