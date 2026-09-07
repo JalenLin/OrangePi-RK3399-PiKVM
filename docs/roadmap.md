@@ -569,10 +569,20 @@ loader has to be gone, because the BootROM reads it first and mainline's SPL
 then stays on the device that loaded it. There is no way to run a card's
 bootloader on a board whose eMMC has one.
 
-`orangepi-rk3399-pikvm-rk612-uboot-mainline.img` was the source of the loader
-and `/boot` used above, but has not been written to a card as a single `dd`
-and booted, for that same reason — the board would have had to give up its
-eMMC install for it.
+`orangepi-rk3399-pikvm-rk612-uboot-mainline.img` was written to a card as a
+single `dd`, read back byte-identical, and booted the same way: `MMC2` out of
+SPL, `mmc@fe320000.bootdev.part_4` in U-Boot, root on `/dev/mmcblk1p4` with
+the `614e` GUID out of its own `extlinux.conf`, and a working PiKVM — no
+failed units, all five kvmd services, MSD grown to 22.6 G, 1080p,
+`/dev/hidg0..2`, `/dev/mpp_service`.
+
+Getting the card written at all needs one trick worth writing down, since the
+obvious sequence is circular: the card cannot be imaged while the board is
+running from it, and the board will not run from eMMC while a bootable card is
+present. Zeroing **one sector** — the card's sector 64, where `rkimgtest`
+looks for the Rockchip IDB magic — makes the BSP U-Boot skip the card without
+touching anything else on it. The board then boots eMMC with the card still
+in, and the card can be written whole.
 
 ### What it buys, and it is four patches of one kind
 
