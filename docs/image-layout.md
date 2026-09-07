@@ -74,15 +74,30 @@ store is mounted `ro` on purpose: kvmd flips it to `rw` through
 `kvmd-helper-otgmsd-remount` only for the duration of a write, so a crash
 mid-upload cannot leave it dirty.
 
-## One non-obvious step in mkimage.sh
+## Two non-obvious steps in mkimage.sh
 
-`rm -f /.dockerenv`. The rootfs comes out of `docker export`, and the
+**`rm -f /.dockerenv`.** The rootfs comes out of `docker export`, and the
 container runtime creates that file in every container it starts, so it is in
 the tarball. Leave it and `systemd-detect-virt` answers `docker` on the real
 board, systemd skips every unit guarded by
 `ConditionVirtualization=!container`, and `systemd-timesyncd` never starts.
 The board has no RTC, so nothing ever sets the clock and every log timestamp
 stays in 1970. `systemd-random-seed` is skipped for the same reason.
+
+**Writing `/etc/hostname`, `/etc/hosts` and `/etc/resolv.conf`.** These cannot
+be written from the Dockerfile. The container runtime bind-mounts all three
+into every container it starts, `RUN` steps included, so a write lands on the
+mount and disappears with it; `docker export` then emits three 0-byte files.
+This shipped once and reached a card: the board answered to `localhost`, had
+no `localhost` entry in `/etc/hosts` at all, and carried an empty
+`/etc/resolv.conf`.
+
+DNS still worked, which is why it survived review for as long as it did —
+Arch's `nsswitch.conf` lists `resolve` ahead of `dns`, so glibc asks
+`systemd-resolved` over D-Bus and never opens `resolv.conf`. Anything that
+reads the file directly gets nothing. `/etc/resolv.conf` is written as the
+symlink to `../run/systemd/resolve/stub-resolv.conf` that `systemd-resolved`
+expects, not as a copy.
 
 ## Rebuilding just the image
 

@@ -164,8 +164,15 @@ COPY --from=rkmpp /opt/rkmpp /opt/rkmpp
 RUN ln -sf "/usr/share/zoneinfo/${TARGET_TIMEZONE}" /etc/localtime \
  && echo "${TARGET_LOCALE} UTF-8" > /etc/locale.gen \
  && locale-gen \
- && echo "LANG=${TARGET_LOCALE}" > /etc/locale.conf \
- && echo "${TARGET_HOSTNAME}" > /etc/hostname
+ && echo "LANG=${TARGET_LOCALE}" > /etc/locale.conf
+
+# /etc/hostname, /etc/hosts and /etc/resolv.conf are deliberately NOT written
+# here. The container runtime bind-mounts all three into every container it
+# starts, including the ones RUN executes in, so a write lands on the mount and
+# is discarded with it - `docker export` then emits three 0-byte files. This
+# was shipped once: the board came up as "localhost" with an empty /etc/hosts
+# and an empty /etc/resolv.conf. mkimage.sh writes them into the rootfs tree
+# instead, next to /etc/fstab, where no bind-mount can intercept them.
 
 # Our board overlay lands on top of whatever the packages installed, so it
 # wins over the upstream defaults it replaces.

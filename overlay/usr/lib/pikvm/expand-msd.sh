@@ -35,4 +35,9 @@ log "growing the filesystem on ${node}"
 e2fsck -fp "${node}" || true      # resize2fs refuses on an unchecked fs
 resize2fs "${node}"
 
+# The GPT rewrite above made udev tear down and recreate every by-partuuid
+# symlink. The fsck unit is ordered after this one now, but it looks the
+# partition up through that symlink, so leave nothing in flight.
+udevadm settle 2>/dev/null || true
+
 log "done: $(findmnt -no SIZE "${node}" 2>/dev/null || lsblk -no SIZE "${node}")"

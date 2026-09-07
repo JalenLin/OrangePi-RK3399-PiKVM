@@ -67,6 +67,26 @@ fi
 # API reports storage: null and no ISO can ever be uploaded. It is mounted ro
 # on purpose: kvmd flips it to rw through kvmd-helper-otgmsd-remount only while
 # writing, so a crash mid-upload cannot leave the store dirty.
+# The container runtime bind-mounts /etc/hostname, /etc/hosts and
+# /etc/resolv.conf into every container, so anything the Dockerfile writes to
+# them is thrown away with the mount and 'docker export' emits 0-byte files.
+# They have to be written here, on the unpacked tree, instead. Shipped broken
+# once: the board answered to "localhost", had no localhost entry at all, and
+# carried an empty /etc/resolv.conf.
+echo ':: writing hostname, hosts and resolv.conf'
+echo '${TARGET_HOSTNAME}' > \"\${ROOTDIR}/etc/hostname\"
+cat > \"\${ROOTDIR}/etc/hosts\" <<HOSTS
+127.0.0.1	localhost
+::1		localhost
+127.0.1.1	${TARGET_HOSTNAME}.localdomain	${TARGET_HOSTNAME}
+HOSTS
+# systemd-resolved owns resolution here (it is enabled in the rootfs, and
+# nsswitch's \"resolve\" module reaches it over D-Bus). The stub file it
+# manages only exists at runtime, so this has to be the symlink upstream
+# expects rather than a copy - a plain empty file silently starves anything
+# that reads resolv.conf directly instead of going through NSS.
+ln -sf ../run/systemd/resolve/stub-resolv.conf \"\${ROOTDIR}/etc/resolv.conf\"
+
 mkdir -p \"\${ROOTDIR}/var/lib/kvmd/msd\"
 cat > \"\${ROOTDIR}/etc/fstab\" <<FSTAB
 PARTUUID=${ROOTFS_PART_UUID}  /  ext4  defaults,noatime,commit=600  0  1
