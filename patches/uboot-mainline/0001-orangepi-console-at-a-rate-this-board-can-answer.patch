@@ -11,11 +11,12 @@ board's three-pin header cannot take a burst at - see patches/uboot/0001 for
 the measurements - which makes the prompt awkward in exactly the situation
 you need it.
 
-It also made mainline look like it was hanging. TPL and SPL print at
-CONFIG_BAUDRATE, so a terminal at 115200 sees the DDR lines and the FIT load
-and then nothing at all - because BL31 (rkbin's blob) and U-Boot proper are
-both talking at 1500000 by then. That silence was read as a stall at the SPL
-handoff; it is not evidence of one.
+It was briefly suspected of being why mainline looked like it hung, on the
+theory that BL31 and U-Boot proper had moved to 1500000 while the capture
+stayed at 115200. That was wrong - the stall was real, and it was SPL loading
+a BL31 that overlapped its own text; see "Mainline U-Boot" in
+docs/roadmap.md. This patch is what makes the console legible once that is
+fixed, not the fix itself.
 
 The value in the kernel's copy of this file is right for the kernel's own
 console, so this belongs here rather than in the shared DTS.

@@ -18,14 +18,18 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         python2 python3 python3-pyelftools python-is-python3 \
         ca-certificates make swig \
         python3-setuptools python3-dev libgnutls28-dev uuid-dev \
+        gcc-arm-none-eabi libnewlib-arm-none-eabi \
         parted gdisk e2fsprogs dosfstools \
     && rm -rf /var/lib/apt/lists/*
 
-# The last four of those are only for mainline U-Boot, and each is a hard stop
-# rather than a nicety: setuptools and python3-dev build scripts/dtc/pylibfdt,
-# which binman needs; libgnutls28-dev builds tools/mkeficapsule, which the
-# tools target builds unconditionally; uuid-dev goes with it. Without them the
-# build dies in scripts_dtc and then in tools, long before any board code.
+# The last six of those are only for the mainline U-Boot track, and each is a
+# hard stop rather than a nicety: setuptools and python3-dev build
+# scripts/dtc/pylibfdt, which binman needs; libgnutls28-dev builds
+# tools/mkeficapsule, which the tools target builds unconditionally; uuid-dev
+# goes with it. Without them the build dies in scripts_dtc and then in tools,
+# long before any board code. The arm-none-eabi pair is not for the SoC at all
+# - TF-A builds rk3399's power-management firmware for the Cortex-M0 inside
+# it, and links the result into BL31.
 
 # The vendor Linaro 6.3 toolchain is bind-mounted at /toolchain by the build
 # scripts (it lives in sources/toolchain, cloned from orangepi-xunlong).

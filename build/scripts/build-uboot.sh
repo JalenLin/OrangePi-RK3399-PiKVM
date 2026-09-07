@@ -59,15 +59,28 @@ bsp)
 mainline)
     UBOOT_DIR="${SOURCES}/uboot-ml"
 
-    # external-bsp is still needed: mainline has no trust partition, it packs
-    # BL31 into u-boot.itb, and the blob comes from rkbin.
-    fetch_repo uboot-ml    "${UBOOT_ML_REPO}"  "${UBOOT_ML_TAG}"
-    fetch_repo external-bsp "${EXTERNAL_REPO}" "${EXTERNAL_BRANCH}"
+    fetch_repo uboot-ml "${UBOOT_ML_REPO}" "${UBOOT_ML_TAG}"
+    fetch_repo tfa      "${TFA_REPO}"      "${TFA_TAG}"
 
-    bl31="${SOURCES}/external-bsp/rkbin/${UBOOT_ML_BL31}"
-    [[ -f "${bl31}" ]] || die "BL31 blob not found: ${bl31}"
+    apply_patches "${SOURCES}/tfa" "${PATCHES}/tfa"
+    apply_patches "${UBOOT_DIR}"   "${PATCHES}/uboot-mainline"
 
-    apply_patches "${UBOOT_DIR}" "${PATCHES}/uboot-mainline"
+    # BL31 is built here rather than taken from rkbin, and that is the whole
+    # reason this track boots at all - see the comment on TFA_REPO in
+    # config/board.conf. The M0 cross-compiler is for rk3399's power-management
+    # firmware, which TF-A builds into BL31.
+    # Unconditionally, not "if the elf is missing": TF-A's make is incremental
+    # and takes under a minute, and caching it would quietly keep a stale BL31
+    # after apply_patches had reset the tree under it.
+    bl31="${SOURCES}/tfa/${TFA_BL31}"
+    msg "building TF-A ${TFA_TAG} BL31 (PLAT=${TFA_PLAT})"
+    kbuild_run "
+        set -e
+        cd sources/tfa
+        make PLAT=${TFA_PLAT} CROSS_COMPILE=/usr/bin/aarch64-linux-gnu- \
+             M0_CROSS_COMPILE=arm-none-eabi- bl31 -j\$(nproc)
+    "
+    [[ -f "${bl31}" ]] || die "TF-A did not produce ${TFA_BL31}"
 
     msg "building U-Boot ${UBOOT_ML_TAG} (${UBOOT_ML_DEFCONFIG})"
     # ARCH=arm, not arm64: U-Boot has never renamed it. The compiler is named
@@ -82,7 +95,7 @@ mainline)
             /work/config/uboot-fragments/pikvm.config
         make ARCH=arm CROSS_COMPILE=/usr/bin/aarch64-linux-gnu- olddefconfig
         make ARCH=arm CROSS_COMPILE=/usr/bin/aarch64-linux-gnu- \
-             BL31=/work/sources/external-bsp/rkbin/${UBOOT_ML_BL31} -j\$(nproc)
+             BL31=/work/sources/tfa/${TFA_BL31} -j\$(nproc)
     "
 
     # merge_config only warns when a symbol does not survive, and both of ours
@@ -100,9 +113,9 @@ mainline)
     # which is the layout to use if the config fragment is ever dropped.
     cp -f "${UBOOT_DIR}/u-boot-rockchip.bin" "${OUT}/" 2>/dev/null || true
 
-    warn "mainline U-Boot does not boot this board - it stops at the SPL"
-    warn "handoff to BL31, and there is no way back from it but maskrom."
-    warn "See \"Mainline U-Boot\" in docs/roadmap.md."
+    warn "mainline U-Boot boots this board but nothing yet loads a kernel"
+    warn "from it: the kernel lives in a raw Rockchip boot partition that"
+    warn "mainline cannot read. See \"Mainline U-Boot\" in docs/roadmap.md."
     ;;
 
 esac
