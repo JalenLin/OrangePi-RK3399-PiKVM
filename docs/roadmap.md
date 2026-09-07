@@ -538,6 +538,13 @@ DV timings: 1920x1080
 
 So the whole path is the artifact, not a hand-assembly of its parts.
 
+Its SD counterpart, `orangepi-rk3399-pikvm-rk612-uboot-mainline.img`, builds
+and is byte-checked but **has not been booted**. A card is its proper home,
+and on a board whose eMMC already carries a loader the BootROM never reaches
+one — so testing it means erasing the eMMC's loader first, which was not worth
+doing to a working board. Everything it contains is shared with the eMMC image
+that was booted, apart from six GUIDs.
+
 ### What it buys, and it is four patches of one kind
 
 Every one of them exists only because the BSP U-Boot calls
