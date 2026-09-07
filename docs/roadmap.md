@@ -471,7 +471,30 @@ No `storagemedia=`, no `androidboot.*`, and a full 36-character GUID that came
 from `extlinux.conf` rather than from thirteen characters compiled into a
 bootloader.
 
-**One thing follows from that and has not been exercised yet:** on this track
+### With a card in the slot
+
+Measured, because the scan order is easy to assume and worth having on record.
+A mainline eMMC with an ordinary BSP-track card in the slot:
+
+```
+Scanning bootdev 'mmc@fe320000.bootdev':      <- the card, scanned first
+Scanning bootdev 'mmc@fe330000.bootdev':      <- eMMC
+  1  extlinux  ready  mmc  4  …  /boot/extlinux/extlinux.conf
+** Booting bootflow 'mmc@fe330000.bootdev.part_4' with extlinux
+```
+
+The card **is** scanned first — `BOOT_TARGETS` is `"mmc1 mmc0 …"` and
+`mmc1 = &sdmmc` — and it is scanned successfully; there is simply nothing on
+it that bootstd can boot, since a BSP-track card has no `extlinux.conf` and no
+partition marked bootable. It falls through to eMMC without complaint, and
+Linux still sees the card as a full `mmcblk1`. So the card neither boots nor
+interferes.
+
+The rule that follows is the one worth remembering: **do not mix tracks across
+media.** A mainline bootloader cannot boot a BSP-track card, and the reverse
+combination boots the card the BSP way, using none of this.
+
+**One more thing follows, and has not been exercised yet:** on this track
 the SD and eMMC images no longer need to differ at all. The GUID split exists
 only because the BSP U-Boot picks `root=` from the medium
 ([emmc.md](emmc.md)); with `extlinux.conf` naming it, one image would boot from
