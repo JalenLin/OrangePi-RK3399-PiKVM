@@ -14,16 +14,43 @@ docs/emmc.md) and nothing in between ever stops to ask. Recovery meant
 maskrom mode, a USB-C cable and the MASKROM key. Two seconds of autoboot
 delay is the cheapest insurance in this tree.
 
-CONFIG_BAUDRATE=1500000. The delay is only worth having if the "hit any key"
-can be answered, and on this board's wiring 1500000 reads cleanly but
-corrupts on write - which is exactly why the kernel console was already moved
-down to 115200 (bootargs, patch 0001 of the kernel series). U-Boot was the
-last thing left at the high rate, so the console changed speed halfway
-through every boot and the half you could type into was the half that had
-already finished. Both halves are 115200 now.
+CONFIG_BAUDRATE=1500000. 1500000 is the Rockchip convention and every RK3399
+defconfig ships it, so this is the line to justify rather than the other one.
+It comes down to the debug header having three pins.
 
-The trust.img blob still prints its own lines at 1500000; those few bytes
-arrive as garbage and are the only thing left that does.
+Measured on this board, CH341 straight to the header, 1900 bytes each way:
+
+    115200   board -> host  1900/1900     host -> board  1900/1900
+    1500000  board -> host  1900/1900     host -> board  1878/1900
+
+and /proc/tty/driver/serial shows why - two overruns, and zero framing or
+parity errors. The bytes arrive intact and the receiver drops them. Send the
+same 1900 bytes in 32-byte chunks 2 ms apart and it is 1900/1900 with the
+overrun count unchanged, which settles it: the link is clean at 1500000 and
+what fails is a sustained burst.
+
+That is structural, not a fault. ttyS2 reports base_baud = 1500000, i.e. a
+24 MHz uartclk and a divisor of exactly 1 - the ceiling for this UART - into
+a 64-byte FIFO with no CTS, because the header carries TX, RX and ground and
+nothing else. Anything longer than a keystroke, a pasted command in
+particular, is a burst. 115200 has 13x the slack and needs no flow control to
+survive one.
+
+The other thing worth ruling out is the adapter. An RS-232 transceiver in the
+path - the common USB-to-RS232 into an RS-232-to-TTL board rig - is specified
+to 235 kbps in the SP3232E/MAX3232 family, so 1500000 is far outside its
+sheet. That has not been measured here and at least one person reports that
+rig working, so treat it as the first thing to swap out rather than as the
+explanation.
+
+This supersedes an earlier note in this tree that said the board "corrupts on
+write" at 1500000. It does not. The bytes arrive intact; the receiver drops
+them when they arrive faster than it drains them, and only then.
+
+The kernel console was already at 115200 (bootargs, patch 0001 of the kernel
+series), so this also stops the console changing speed halfway through every
+boot. The trust.img blob still prints its own lines at 1500000; those few
+bytes of garbage are the only thing left that does.
 
 diff --git a/configs/rk3399_defconfig b/configs/rk3399_defconfig
 index c83fd8aa..4296b014 100755

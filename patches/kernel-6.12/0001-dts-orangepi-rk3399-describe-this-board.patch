@@ -18,7 +18,8 @@ Five groups. The full reasoning for each is in docs/patches.md.
    event and not a crash. stdout-path is removed (U-Boot hangs in
    initr_serial rebuilding its console around it) while bootargs stays, since
    the two serve different consumers. Console is ttyS2 at 115200: 1500000
-   reads fine on this wiring but corrupts on write.
+   reads fine, but the header has no flow control and the UART overruns on a
+   burst into the board. Measurements are in patches/uboot/0001.
 
 2. Storage and clocks
    mmc0/mmc1 aliases edited in place rather than added as a second aliases
@@ -54,7 +55,7 @@ Five groups. The full reasoning for each is in docs/patches.md.
 
 --- a/arch/arm64/boot/dts/rockchip/rk3399-orangepi.dts
 +++ b/arch/arm64/boot/dts/rockchip/rk3399-orangepi.dts
-@@ -15,15 +15,72 @@
+@@ -15,15 +15,75 @@
  	model = "Orange Pi RK3399 Board";
  	compatible = "xunlong,rk3399-orangepi", "rockchip,rk3399";
  
@@ -113,13 +114,16 @@ Five groups. The full reasoning for each is in docs/patches.md.
 +		 * this half is where the console comes from, and without it
 +		 * the kernel gets no console= at all and boots in silence.
 +		 *
-+		 * 115200, not the 1500000 U-Boot uses. Reading at 1500000 is
-+		 * clean, but typing into it is not - characters sent to the
-+		 * board come back corrupted on this wiring, while 115200 is
-+		 * reliable in both directions. A console you cannot type on
-+		 * is not a console. U-Boot's rate is compiled in
-+		 * (CONFIG_BAUDRATE), so its output stays at 1500000; only the
-+		 * kernel and the login prompt move.
++		 * 115200, not the 1500000 that is conventional on RK3399.
++		 * The debug header is three pins - TX, RX, ground - so there
++		 * is no CTS, and at 1500000 this UART runs at divisor 1
++		 * (base_baud reads 1500000) into a 64-byte FIFO. Reading is
++		 * unaffected; a burst into the board is not. Measured: 1878
++		 * of 1900 bytes arrive, two overruns and no framing errors,
++		 * and all 1900 arrive if the same bytes are sent in 32-byte
++		 * chunks 2 ms apart. A pasted command is a burst. U-Boot was
++		 * moved down to match (patches/uboot/0001), so the whole boot
++		 * is one rate.
 +		 *
 +		 * Deliberately no stdout-path: the BSP U-Boot honours that
 +		 * property and hangs inside initr_serial rebuilding its own
@@ -130,7 +134,7 @@ Five groups. The full reasoning for each is in docs/patches.md.
  	};
  
  	clkin_gmac: external-gmac-clock {
-@@ -123,6 +180,14 @@
+@@ -123,6 +183,14 @@
  		vin-supply = <&vcc3v3_sys>;
  	};
  
@@ -145,7 +149,7 @@ Five groups. The full reasoning for each is in docs/patches.md.
  	vcc3v3_sys: vcc3v3-sys {
  		compatible = "regulator-fixed";
  		regulator-name = "vcc3v3_sys";
-@@ -173,7 +238,113 @@
+@@ -173,7 +241,113 @@
  		regulator-boot-on;
  		regulator-min-microvolt = <800000>;
  		regulator-max-microvolt = <1400000>;
@@ -260,7 +264,7 @@ Five groups. The full reasoning for each is in docs/patches.md.
  };
  
  &cpu_l0 {
-@@ -238,8 +409,32 @@
+@@ -238,8 +412,32 @@
  	status = "okay";
  };
  
@@ -293,7 +297,7 @@ Five groups. The full reasoning for each is in docs/patches.md.
  	status = "okay";
  };
  
-@@ -247,6 +442,126 @@
+@@ -247,6 +445,126 @@
  	status = "okay";
  };
  
@@ -420,7 +424,7 @@ Five groups. The full reasoning for each is in docs/patches.md.
  &i2c0 {
  	clock-frequency = <400000>;
  	i2c-scl-rising-time-ns = <168>;
-@@ -276,7 +591,23 @@
+@@ -276,7 +594,23 @@
  		vcc10-supply = <&vcc3v3_sys>;
  		vcc11-supply = <&vcc3v3_sys>;
  		vcc12-supply = <&vcc3v3_sys>;
@@ -445,7 +449,7 @@ Five groups. The full reasoning for each is in docs/patches.md.
  
  		regulators {
  			vdd_center: DCDC_REG1 {
-@@ -364,6 +695,12 @@
+@@ -364,6 +698,12 @@
  				regulator-boot-on;
  				regulator-min-microvolt = <1800000>;
  				regulator-max-microvolt = <3400000>;
@@ -458,7 +462,7 @@ Five groups. The full reasoning for each is in docs/patches.md.
  				regulator-state-mem {
  					regulator-on-in-suspend;
  					regulator-suspend-microvolt = <3000000>;
-@@ -542,7 +879,9 @@
+@@ -542,7 +882,9 @@
  
  		typec_con: connector {
  			compatible = "usb-c-connector";
@@ -469,7 +473,7 @@ Five groups. The full reasoning for each is in docs/patches.md.
  			label = "USB-C";
  			op-sink-microwatt = <1000000>;
  			power-role = "dual";
-@@ -593,6 +932,30 @@
+@@ -593,6 +935,30 @@
  };
  
  &pinctrl {
@@ -500,7 +504,7 @@ Five groups. The full reasoning for each is in docs/patches.md.
  	buttons {
  		pwr_btn: pwr-btn {
  			rockchip,pins = <0 RK_PA5 RK_FUNC_GPIO &pcfg_pull_up>;
-@@ -740,6 +1103,27 @@
+@@ -740,6 +1106,27 @@
  		interrupt-names = "host-wake";
  		pinctrl-names = "default";
  		pinctrl-0 = <&wifi_host_wake_l>;
@@ -528,7 +532,7 @@ Five groups. The full reasoning for each is in docs/patches.md.
  	};
  };
  
-@@ -747,12 +1131,44 @@
+@@ -747,12 +1134,44 @@
  	bus-width = <4>;
  	cap-mmc-highspeed;
  	cap-sd-highspeed;
@@ -574,7 +578,7 @@ Five groups. The full reasoning for each is in docs/patches.md.
  	vmmc-supply = <&vcc3v0_sd>;
  	vqmmc-supply = <&vcc_sdio>;
  	status = "okay";
-@@ -840,6 +1256,15 @@
+@@ -840,6 +1259,15 @@
  	};
  };
  
@@ -590,7 +594,7 @@ Five groups. The full reasoning for each is in docs/patches.md.
  &uart2 {
  	status = "okay";
  };
-@@ -864,9 +1289,34 @@
+@@ -864,9 +1292,34 @@
  	status = "okay";
  };
  
@@ -626,7 +630,7 @@ Five groups. The full reasoning for each is in docs/patches.md.
  };
  
  &usbdrd3_1 {
-@@ -893,3 +1343,177 @@
+@@ -893,3 +1346,177 @@
  &vopl_mmu {
  	status = "okay";
  };

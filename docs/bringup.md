@@ -6,9 +6,15 @@ without rebuilding the whole image.
 
 Serial console: **115200 8N1** on the debug UART, for the whole boot. RK3399
 boards conventionally use 1500000 and the vendor U-Boot defaults to it, but
-this one writes corrupt at that rate, so both U-Boot and the kernel were moved
-down (`patches/uboot/0001`). The prebuilt BL31 blob still prints its own lines
-at 1500000; those few bytes of garbage are expected.
+the header has no flow control and the UART overruns on bursts at that rate,
+so both U-Boot and the kernel were moved down (`patches/uboot/0001`, which has
+the measurements). The prebuilt BL31 blob still prints its own lines at
+1500000; those few bytes of garbage are expected.
+
+A USB-to-TTL adapter straight onto the header is the simplest thing that
+works. A USB-to-RS232 adapter feeding an RS-232-to-TTL board is fine at
+115200; it is only worth suspecting if you go back up to 1500000, where those
+transceivers are outside their 235 kbps sheet.
 
 ```sh
 picocom -b 115200 /dev/ttyUSB0

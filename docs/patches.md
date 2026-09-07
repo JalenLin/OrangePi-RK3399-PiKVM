@@ -55,7 +55,9 @@ sets of context that shifted whenever any of them changed.
 
   U-Boot takes the first match and booted anyway. `sdio0` needs no alias of
   its own - it carries no block device.
-* **`console=ttyS2,115200n8`.** 1500000 reads fine but writes corrupt on this
+* **`console=ttyS2,115200n8`.** 1500000 reads fine, but the header has no
+  flow control and the UART overruns on a burst into the board; measurements
+  are under uboot/0001. Previously recorded here as "writes corrupt on this
   wiring; a console you cannot type on is not a console.
 * **CPU rates pinned** (`ARMCLKB` 1.2 GHz, `ARMCLKL` 816 MHz) because
   cpufreq is off - see below. **The whole of rk3399.dtsi's `&cru`
@@ -653,17 +655,46 @@ Hit key to stop autoboot('CTRL+C'):  2  1  0
 and there is no `boot` command in this build, so `run bootcmd` is how you
 continue by hand.
 
-**`CONFIG_BAUDRATE=1500000` → `115200`.** The delay is only worth having if
-the prompt can be typed at, and on this board's wiring 1500000 reads cleanly
-but corrupts on write — which is why the kernel console was moved down to
-115200 in the first place (patch 0001's `bootargs`). U-Boot was the last thing
-left at the high rate, so the console changed speed halfway through every boot
-and the half you could type into was the half that had already finished. Both
-halves are 115200 now, and `docs/logs/` stops needing two terminals.
+**`CONFIG_BAUDRATE=1500000` → `115200`.** 1500000 is the Rockchip convention
+and every RK3399 defconfig ships it, so this is the line that needs
+justifying. It comes down to the debug header having three pins.
 
-What still speaks at 1500000 is `trust.img`, the prebuilt BL31 blob from
-`rkbin`. Its handful of lines arrive as garbage and are the only thing left
-that does.
+Measured on this board, a CH341 straight onto the header, 1900 bytes each way:
+
+| | board → host | host → board |
+|---|---|---|
+| **115200** | 1900 / 1900 | 1900 / 1900 |
+| **1500000** | 1900 / 1900 | **1878 / 1900** |
+
+`/proc/tty/driver/serial` says what happened: `oe:2`, and zero framing or
+parity errors. The bytes arrive intact and the receiver drops them. Send the
+same 1900 bytes in 32-byte chunks 2 ms apart and it is 1900/1900 with the
+overrun count unchanged — so the link is clean at 1500000 and what fails is a
+sustained burst.
+
+That is structural rather than a fault. `ttyS2` reports
+`base_baud = 1500000`: a 24 MHz `uartclk` and a divisor of exactly 1, the
+ceiling for this UART, feeding a 64-byte FIFO with no CTS to fall back on
+because the header carries TX, RX and ground and nothing else. Anything longer
+than a keystroke — a pasted command, most obviously — is a burst. 115200 has
+thirteen times the slack and needs no flow control to survive one.
+
+The other thing worth ruling out is the adapter. An RS-232 transceiver in the
+path — the common USB-to-RS232 into an RS-232-to-TTL board rig — is specified
+to 235 kbps in the SP3232E/MAX3232 family, so 1500000 is well outside its
+sheet. That has not been measured here, and at least one person reports that
+rig working at 1500000, so treat it as the first thing to swap out rather than
+as the explanation.
+
+This supersedes an earlier note in this tree that said the board "corrupts on
+write" at 1500000. It does not. The bytes arrive intact — no framing errors,
+none — and the receiver drops them when they arrive faster than it drains
+them, and only then.
+
+The kernel console was already at 115200 (patch 0001's `bootargs`), so this
+also stops the console changing speed halfway through every boot. What still
+speaks at 1500000 is `trust.img`, the prebuilt BL31 blob from `rkbin`; its
+handful of lines arrive as garbage and are the only thing left that does.
 
 ## pikvm.config — kernel options
 

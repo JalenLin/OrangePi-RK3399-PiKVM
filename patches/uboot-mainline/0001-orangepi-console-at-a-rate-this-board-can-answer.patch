@@ -6,9 +6,10 @@ shared with Linux - says
     stdout-path = "serial2:1500000n8";
 
 and U-Boot proper honours the rate in stdout-path, so it overrides
-CONFIG_BAUDRATE the moment it takes over from SPL. On this board that is the
-rate that reads cleanly and corrupts on write, which makes the U-Boot prompt
-unusable in exactly the situation you need it.
+CONFIG_BAUDRATE the moment it takes over from SPL. That is the rate this
+board's three-pin header cannot take a burst at - see patches/uboot/0001 for
+the measurements - which makes the prompt awkward in exactly the situation
+you need it.
 
 It also made mainline look like it was hanging. TPL and SPL print at
 CONFIG_BAUDRATE, so a terminal at 115200 sees the DDR lines and the FIT load

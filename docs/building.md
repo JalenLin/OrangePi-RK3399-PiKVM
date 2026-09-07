@@ -132,12 +132,20 @@ on the board.
 picocom -b 115200 /dev/ttyUSB0
 ```
 
-It did not use to be. RK3399 boards ship a 1500000 console and the vendor
-defconfig keeps it, but on this board's wiring 1500000 reads cleanly and
-corrupts on write — a console you cannot type into — so the kernel was moved
-down to 115200 and U-Boot followed (`patches/uboot/0001`). The only thing
-still talking at 1500000 is the prebuilt BL31 blob, whose handful of lines
-arrive as garbage. Expect them.
+It did not use to be. RK3399 boards conventionally run the console at 1500000
+and the vendor defconfig keeps it, but this board's debug header is three
+pins — TX, RX, ground, no CTS — and at 1500000 its UART sits at divisor 1 with
+a 64-byte FIFO. Bytes arrive intact and the receiver drops them on any burst:
+measured, 1878 of 1900 with two overruns and no framing errors, and 1900 of
+1900 once the same bytes are sent in 32-byte chunks. A pasted command is a
+burst. So both halves are 115200 (`patches/uboot/0001`, which has the
+numbers). The only thing still talking at 1500000 is the prebuilt BL31 blob,
+whose handful of lines arrive as garbage. Expect them.
+
+If you do run at 1500000, use a USB-to-TTL adapter straight onto the header.
+An RS-232 transceiver in the path is specified to 235 kbps in the
+SP3232E/MAX3232 family, so it is the first thing to swap out if that rate
+misbehaves.
 
 **U-Boot stops for you.** Two seconds, and the key is Ctrl+C:
 
