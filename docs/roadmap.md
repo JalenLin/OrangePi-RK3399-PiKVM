@@ -23,12 +23,19 @@ minute. Track 1.5 is now the real first track.
 - [x] Whole pipeline builds: U-Boot, kernel (4.4.179, `boot.img` 19 MB),
       Arch/PiKVM rootfs (2.6 GB), assembled 3.3 GB image with the partition
       table, rootfs GUID and raw payload offsets verified
-- [ ] **Verify on hardware** — every item below is unconfirmed until the board
-      says otherwise:
-  - [ ] TC358749 I²C address (`0x0f` vs the DTS's `0x1f`)
-  - [ ] `/dev/video*` node name, so the udev rule actually matches
-  - [ ] 1080p60 capture, and what the CPU cost of software MJPEG really is
-  - [ ] HID gadget enumerating on the target machine
+- [x] **Verify on hardware** — this list was written before the board had
+      ever booted; all of it has since been answered by the board itself:
+  - [x] TC358749 I²C address — `0x1f`, as the DTS had it. The bridge probes
+        as `hdmi-bridge@1f` on i2c1 and the driver binds.
+  - [x] `/dev/video*` node name, so the udev rule actually matches —
+        `/dev/kvmd-video` resolves to `video0`, the rkisp1 main path.
+  - [x] 1080p60 capture, and what the CPU cost of software MJPEG really is —
+        316% and 78 °C, which is what made the VPU work non-optional.
+  - [x] HID gadget on the target machine — not just enumerating. Verified end
+        to end against a Raspberry Pi 3: text sent through kvmd's API arrives
+        as the right reports (`02 00 0b` for a shifted `h`), absolute mouse
+        coordinates land where they should, and the target reads a mounted
+        image off `/dev/sr0`.
   - [x] ATX GPIO pin assignment - settled on paper from the vendor schematic
         and this tree's own device tree; see docs/hardware.md. Ships
         disabled, because the optocouplers do not exist yet, but the pins are

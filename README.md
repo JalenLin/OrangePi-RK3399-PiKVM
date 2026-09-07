@@ -17,8 +17,8 @@ Verified on hardware, not inferred from config symbols:
 | **Video** | 1080p60 HDMI IN capture, follows source mode changes |
 | **MJPEG** | encoded on the SoC's VPU, ~50% of one core |
 | **H.264 / WebRTC** | same VPU, Constrained Baseline 1080p, `kvmd-janus` and `kvmd-media` serving |
-| **HID** | keyboard and mouse over the Type-C port, enumerating on a real target |
-| **Mass storage** | ISO/CD-ROM emulation, store expands to fill the card on first boot |
+| **HID** | keyboard and mouse over the Type-C port, verified end to end against a real target |
+| **Mass storage** | ISO/CD-ROM emulation, read back from the target; store expands to fill the card on first boot |
 | **Network** | gigabit ethernet; Wi-Fi on mainline `brcmfmac` (AP6356S) |
 | **Kernel** | Rockchip BSP 6.12.69, with 13 patches |
 | **Userland** | Arch Linux ARM + PiKVM's own packages, systemd 261 |

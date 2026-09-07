@@ -204,6 +204,25 @@ it there is no keyboard or mouse and the KVM is just a capture card. This is
 why `config/kernel-fragments/pikvm.config` exists, and why
 `build-kernel.sh` hard-fails if the symbol goes missing.
 
+The gadget presents four interfaces: three HID (keyboard, absolute mouse,
+relative mouse) and one mass storage. Measured against a Raspberry Pi 3 host,
+the keyboard's interrupt IN endpoint is serviced at **250 reports/s, a 4 ms
+interval** — `f_hid.c` hardcodes `bInterval = 4` for every HID function, which
+at high speed asks for 1 ms, so this host is giving it a quarter of that. It
+is far more than a keyboard or an absolute mouse needs, and worth knowing only
+because it is the number to compare against if input ever goes sluggish.
+
+Measure it with blocking writes, not the obvious non-blocking loop: the gadget
+buffers exactly one report, so a burst of non-blocking writes returns `EAGAIN`
+after the first one on a perfectly healthy endpoint.
+
+```sh
+python3 -c 'import os,time
+fd=os.open("/dev/kvmd-hid-keyboard",os.O_WRONLY); t=time.time(); n=0
+while time.time()-t < 10: os.write(fd,bytes(8)); n+=1
+print(n/10, "reports/s")'
+```
+
 ## Video encoding
 
 | | vendor 4.4 | mainline |
