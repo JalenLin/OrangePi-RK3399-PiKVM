@@ -89,6 +89,12 @@ a time while you are changing things:
 | `make image` | the GPT card image | `output/*.img` | 3 min |
 | `make emmc-image` | the same, for the onboard eMMC | `output/*-emmc.img` | 3 min |
 
+`UBOOT_TRACK=mainline` on `make uboot` and `make image` builds against U-Boot
+v2025.07 and TF-A instead of the vendor's 2017.09 fork, into
+`output/uboot-mainline/` and `output/*-uboot-mainline.img`. It boots — see
+docs/roadmap.md — but the default is still `bsp`, so nothing changes unless
+you ask for it.
+
 `make rootfs` is the slow one and it is slow for a reason: every `pacman`
 invocation runs aarch64 binaries under qemu-user emulation. It is not hung.
 

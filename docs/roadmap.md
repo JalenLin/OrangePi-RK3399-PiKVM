@@ -331,7 +331,7 @@ unofficial machinery under a working stream. Route B - a VEPU2 encoder in
 `hantro` - is still the only version of this that ends with nothing of ours
 in userspace at all.
 
-## Mainline U-Boot — it boots
+## Mainline U-Boot — it boots, all the way to PiKVM
 
 `make uboot UBOOT_TRACK=mainline` builds U-Boot v2025.07 for this board with
 BL31 from mainline TF-A v2.12, and on hardware it comes all the way up:
@@ -399,29 +399,89 @@ is why `TFA_REPO` is in `config/board.conf` and why the container carries
 `gcc-arm-none-eabi` — TF-A builds rk3399's Cortex-M0 power-management firmware
 into BL31.
 
-### What is left before it can replace the BSP U-Boot
+### How the kernel is reached, and the one flag that decides it
 
-One thing: **nothing loads a kernel from it yet.** This image keeps the kernel
-in a raw Rockchip `boot.img` (kernel + `resource.img` holding the DTB) in
-partition 3, and mainline cannot read that format at all. `bootflow scan`
-finds nothing and drops to the prompt.
-
-The fix is smaller than it sounds, and it does not need a new partition.
+Mainline cannot read Rockchip's raw `boot.img`, so the kernel is reached
+through `/boot` on the root filesystem instead. That needed no new partition:
 bootstd scans `/` **and `/boot/`** on every partition it can read
 (`default_prefixes[]` in `boot/bootstd-uclass.c`), and the rootfs is already
-`-O ^metadata_csum` ext4 that U-Boot reads happily. So `/boot/Image`,
-`/boot/*.dtb` and `/boot/extlinux/extlinux.conf` on partition 4 are enough,
-with the raw `boot` partition simply left alone. That means changes to
-`build-kernel.sh` (install `Image` and the DTB rather than only packing
-`boot.img`) and to `mkimage.sh` (write `extlinux.conf`), and it turns a kernel
-update from `dd` over a partition into a file copy.
+`-O ^metadata_csum` ext4 that U-Boot reads. So `mkimage.sh` writes, on this
+track only:
 
-Free side effects, both of which delete complexity that exists today:
+```
+/boot/pikvm/Image
+/boot/pikvm/rk3399-orangepi.dtb
+/boot/extlinux/extlinux.conf
+```
 
-* `root=` moves into `extlinux.conf`, a full 36-character GUID chosen by us,
-  instead of the hardcoded 13-character prefix the BSP U-Boot compiles in —
-  which is the entire reason [emmc.md](emmc.md) has two GUID families.
-* `trust` (partition 2) becomes dead: mainline packs BL31 into `u-boot.itb`.
+`/boot/pikvm/` and not `/boot/`, because the Arch kernel package already owns
+`/boot/Image` and `/boot/dtbs` and neither is ours. Paths inside
+`extlinux.conf` are absolute from the start of the partition.
+
+**The rootfs partition has to be marked bootable**, and this is the piece that
+cost an evening. `cmd/bootflow.c` sets `BOOTFLOWIF_ONLY_BOOTABLE`
+*unconditionally* — it is not one of the flags `bootflow scan`'s `-b` controls,
+so no bootcmd can turn it off — and `bootdev_find_in_blk()` then falls back to
+scanning **partition 1 alone** when a disk has nothing marked bootable. Here
+that is the raw `uboot` area with no filesystem in it, so the scan finds
+nothing and the board stops at a U-Boot prompt with `extlinux.conf` sitting
+readable on partition 4 the whole time:
+
+```
+=> ext4ls mmc 0:4 /boot/extlinux
+      553   extlinux.conf                 <- U-Boot can see it
+=> bootflow scan -l
+(1 bootflow, 1 valid)                     <- and finds only efi_mgr
+=> bootflow scan -l mmc0:4
+  0  extlinux  ready  mmc  4  …  /boot/extlinux/extlinux.conf
+```
+
+The last line is the proof: naming a partition explicitly sets
+`BOOTFLOWIF_SINGLE_PARTITION`, which is the one path that skips the bootable
+check. `mkimage.sh` now sets GPT attribute bit 2 (`legacy_bios_bootable`,
+which is exactly what `disk/part_efi.c` reads) on partition 4 — on both
+tracks, since the BSP U-Boot finds partitions by name and never looks.
+
+### Verified on hardware
+
+Unattended, from power-on, with the flag set:
+
+```
+Scanning bootdev 'mmc@fe330000.bootdev':
+  1  extlinux  ready  mmc  4  …  /boot/extlinux/extlinux.conf
+** Booting bootflow 'mmc@fe330000.bootdev.part_4' with extlinux
+Retrieving file: /boot/pikvm/Image
+Starting kernel ...
+Linux version 6.12.69-… Machine model: Orange Pi RK3399 Board
+psci: PSCIv1.1 detected in firmware.
+```
+
+and then a working PiKVM: `is-system-running` = `running`, no failed units,
+`kvmd`/`kvmd-otg`/`kvmd-nginx`/`kvmd-janus`/`kvmd-media` all active, 1080p on
+`/dev/kvmd-video`, `/dev/hidg0..2`, `/dev/mpp_service`, the MSD store mounted,
+57 °C.
+
+`/proc/cmdline` is worth looking at, because it is the whole difference:
+
+```
+root=PARTUUID=615e0000-0000-4b53-8000-1d28000054a9 earlycon=… console=ttyS2,115200n8 rw rootfstype=ext4 …
+```
+
+No `storagemedia=`, no `androidboot.*`, and a full 36-character GUID that came
+from `extlinux.conf` rather than from thirteen characters compiled into a
+bootloader.
+
+**One thing follows from that and has not been exercised yet:** on this track
+the SD and eMMC images no longer need to differ at all. The GUID split exists
+only because the BSP U-Boot picks `root=` from the medium
+([emmc.md](emmc.md)); with `extlinux.conf` naming it, one image would boot from
+either. The split is still built, because the BSP track is still the default.
+
+What was verified is the content: the loader sectors, `extlinux.conf`, the
+kernel and the bootable flag, assembled onto the eMMC exactly as
+`mkimage.sh` writes them, and booted. Writing the finished
+`*-uboot-mainline.img` to a device as a single `dd` and booting *that* has not
+been done.
 
 ### What it buys, and it is four patches of one kind
 
@@ -439,6 +499,10 @@ that is otherwise Linux's:
 Mainline U-Boot has its own control DTB and never looks at the kernel's, so
 all four become dead weight — and the `vdd_log` value is already upstream in
 its own `-u-boot.dtsi`.
+
+They are still applied, and have to be: the BSP track is still the default and
+every card in existence runs it. Banking them means deciding to drop that
+track, which is a bigger call than making this one work.
 
 ### Testing it costs less than it did
 

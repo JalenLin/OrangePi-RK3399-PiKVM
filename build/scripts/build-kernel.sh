@@ -92,5 +92,14 @@ mkdir -p "${OUT}"
 cp -f "${KDIR}/boot.img" "${OUT}/"
 cp -f "${KDIR}/arch/arm64/boot/dts/rockchip/${DTB}.dtb" "${OUT}/" 2>/dev/null || true
 
+# The bare Image and DTB as well as boot.img, because the two bootloader
+# tracks want different things from the same build. The BSP U-Boot reads the
+# raw Android boot.img out of partition 3; mainline cannot parse that format at
+# all and reads /boot off the root filesystem instead. Copying both here keeps
+# that choice in mkimage.sh, where the rest of the layout lives, rather than
+# making it a second kernel build.
+[[ -f "${KDIR}/arch/arm64/boot/Image" ]] || die "kernel did not produce Image"
+cp -f "${KDIR}/arch/arm64/boot/Image" "${OUT}/"
+
 msg "kernel ready in output/kernel (track ${KERNEL_TRACK}):"
 ls -lh "${OUT}"
