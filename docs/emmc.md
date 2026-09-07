@@ -54,10 +54,30 @@ The mechanism is not what that behaviour suggests, and the difference is the
 one thing in this document that can cost you a board.
 
 **The BootROM reads eMMC first.** It does not look at the card until the eMMC
-has no loader it can use. What makes the card win is one stage later: the BSP
-U-Boot scans for a boot device itself and prefers SD, which is exactly why it
-then reports `storagemedia=sd`. The card is chosen *by the bootloader that
-came off the eMMC*, not ahead of it.
+has no loader it can use. What makes the card win is one stage later, and the
+BSP U-Boot's environment states the whole rule in five lines:
+
+```
+rkimg_bootdev=
+  if mmc dev 1 && rkimgtest mmc 1; then
+      setenv devtype mmc; setenv devnum 1; echo Boot from SDcard;
+  elif mmc dev 0; then
+      setenv devtype mmc; setenv devnum 0;
+  ...
+```
+
+`rkimgtest` reads sector 64 of the card and looks for the Rockchip IDB magic
+`0xFCDC8C3B`. So the card is chosen *by the bootloader that came off the
+eMMC*, not ahead of it — and only if it carries a loader of its own.
+
+**That preference is not quite absolute.** Both halves of the condition have
+to pass, and `mmc dev 1` is a live probe of a card that may still be busy.
+Seen once here: a reboot issued immediately after rewriting the card's loader
+region booted the eMMC instead, and the two boots after it picked the card
+again. If a board comes up on the wrong medium right after you have written a
+lot to the card, power-cycle it before believing anything. `no mmc device at
+slot 1` on the console is *not* the symptom — that line appears on every
+successful SD boot, ahead of a retry that works.
 
 This was measured the expensive way. Testing mainline U-Boot meant writing its
 TPL/SPL to the eMMC, and mainline's SPL takes its boot order from
