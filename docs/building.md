@@ -142,10 +142,14 @@ burst. So both halves are 115200 (`patches/uboot/0001`, which has the
 numbers). The only thing still talking at 1500000 is the prebuilt BL31 blob,
 whose handful of lines arrive as garbage. Expect them.
 
-If you do run at 1500000, use a USB-to-TTL adapter straight onto the header.
-An RS-232 transceiver in the path is specified to 235 kbps in the
-SP3232E/MAX3232 family, so it is the first thing to swap out if that rate
-misbehaves.
+**Use a 3.3 V adapter.** This header is 3.0 V (`gpio1830-supply = <&vcc_3v0>`)
+and 5 V USB-to-TTL boards are over the pads' absolute maximum — they appear to
+work, because the out-of-spec direction is the one you type into.
+docs/hardware.md has the detail.
+
+If you do run at 1500000, go straight onto the header. An RS-232 transceiver
+in the path is specified to 235 kbps in the SP3232E/MAX3232 family, so it is
+the first thing to swap out if that rate misbehaves.
 
 **U-Boot stops for you.** Two seconds, and the key is Ctrl+C:
 

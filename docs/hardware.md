@@ -313,6 +313,34 @@ GPIO2_A/B are on `APIO2`, which the device tree ties to
 
 So: **stay in GPIO2 group A or B.** Group C is Bluetooth's and 1.8 V.
 
+### The debug UART is 3.0 V, not 3.3
+
+Worth stating plainly, because every USB-to-TTL adapter drawer has a 5 V one
+in it and this board does not survive that gracefully.
+
+UART2 is on `gpio4` group C, which RK3399 puts in the `gpio1830` IO domain,
+and this board's device tree ties that domain to `vcc_3v0`
+(`gpio1830-supply = <&vcc_3v0>`). The running kernel says so too, rather than
+this being read off the source:
+
+```
+rockchip-iodomain ff770000.syscon:io-domains: gpio1830(3000000 uV) supplied by vcc_3v0
+```
+
+and `/sys/class/regulator` has `vcc_3v0` at `3000000 uV`. So the pads run at
+3.0 V, and the absolute maximum on an input is
+VDD_IO + 0.3 V = **3.3 V**. A 3.3 V adapter sits exactly on that limit, which
+is the normal thing everyone does. A 5 V adapter is 1.7 V over it, and the
+only reason such a board appears to work is that the pad's ESD clamp is
+conducting the difference away — which is a diode being used as a component
+it is not.
+
+Note the asymmetry, because it makes a bad adapter look fine: the board's TX
+at 3.0 V clears a 5 V part's input threshold comfortably, so reading the
+console works perfectly. It is only the adapter's TX into the board that is
+out of spec, and it will usually still be readable. Working is not evidence of
+being in spec here.
+
 ### What is actually free
 
 Everything on the header is bank `gpio2` except SPI1/I2C4 (`gpio1`), the
@@ -332,7 +360,7 @@ And what is not, which matters more:
 
 | header | pin | RK3399 | taken by |
 |---|---|---|---|
-| TX / RX | 8, 10 | GPIO4_C4/C3 | the debug console (`ttyS2`) |
+| TX / RX | 8, 10 | GPIO4_C4/C3 | the debug console (`ttyS2`) — **3.0 V**, see below |
 | GPIO17/27/22/25 | 11, 13, 15, 22 | GPIO2_C0..C3 | UART0 - Bluetooth |
 | GPIO6 | 31 | GPIO2_A5 | **HDMI IN rail** (`hdmiin_gpios`) |
 | GPIO13 | 33 | GPIO2_A6 | **HDMI IN rail** |

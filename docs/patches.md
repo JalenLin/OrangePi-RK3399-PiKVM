@@ -659,7 +659,8 @@ continue by hand.
 and every RK3399 defconfig ships it, so this is the line that needs
 justifying. It comes down to the debug header having three pins.
 
-Measured on this board, a CH341 straight onto the header, 1900 bytes each way:
+Measured on this board, a USB-to-TTL adapter straight onto the header, 1900
+bytes each way:
 
 | | board → host | host → board |
 |---|---|---|
@@ -690,6 +691,16 @@ This supersedes an earlier note in this tree that said the board "corrupts on
 write" at 1500000. It does not. The bytes arrive intact — no framing errors,
 none — and the receiver drops them when they arrive faster than it drains
 them, and only then.
+
+One caveat on the numbers, since it is the kind of thing that invalidates a
+measurement quietly: the adapter used for them turned out to be a 5 V TTL
+part, and this header is **3.0 V** (see [hardware.md](hardware.md)), so the
+host-to-board leg was driven 1.7 V over the pad's absolute maximum. The
+conclusion does not rest on that leg's signal quality — `oe` with `fe` and
+`pe` both zero says the receiver dropped intact bytes, and the chunked-send
+control run fixes it without changing anything electrical — but the exact
+count of 1878 is not worth quoting to the byte. Re-run it with a 3.3 V
+adapter if you need a precise figure.
 
 The kernel console was already at 115200 (patch 0001's `bootargs`), so this
 also stops the console changing speed halfway through every boot. What still
