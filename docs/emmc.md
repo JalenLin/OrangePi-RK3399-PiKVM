@@ -103,6 +103,14 @@ pigz -1 -c output/orangepi-rk3399-pikvm-rk612-emmc.img \
   | ssh root@<board> 'gzip -dc | dd of=/dev/mmcblk0 bs=4M conv=fsync status=none'
 ```
 
+**Check what the board is running from first** — `findmnt -no SOURCE /`. This
+works because the board is booted from the *card*, so `/dev/mmcblk0` is not in
+use. Run the same line on a board that is already booted from eMMC and you are
+overwriting the root filesystem underneath yourself: it survives for a minute
+on page cache, then `systemd-journald` starts dumping core, `sshd` stops
+answering, and the next boot panics with `Attempted to kill init!`. Done here,
+so it is not a hypothetical.
+
 2 min 16 s here for the 6.2 GB image over gigabit; most of it is zeroes, which
 is why compressing on the way is worth the flag. `/dev/mmcblk0` is always the
 eMMC and `/dev/mmcblk1` always the card — the kernel DTS pins that with
@@ -183,9 +191,34 @@ genuinely needed rescuing:
   hard-resets at about eight seconds, over and over, with no panic and nothing
   in the log to explain it.
 
-**Restoring only the bootloader is seconds, not a 6 GB write.** If the
-partitions and the root filesystem are intact and it is the boot chain you
-broke, write the three blobs back where the layout puts them:
+**A card in the slot is a recovery source, if the bootloader reaches a
+prompt.** Any PiKVM card carries the BSP loader at the same three offsets, so
+it can be copied straight across without a host, a file or a USB cable —
+verified, and it is how the board came back from the mess described above:
+
+```
+=> mmc dev 1                        # the card
+=> mmc read 0x10000000 40 148       # idbloader
+=> mmc dev 0                        # eMMC
+=> mmc write 0x10000000 40 148
+=> mmc dev 1
+=> mmc read 0x10000000 6000 2000    # uboot.img
+=> mmc dev 0
+=> mmc write 0x10000000 6000 2000
+=> mmc dev 1
+=> mmc read 0x10000000 8000 2000    # trust.img
+=> mmc dev 0
+=> mmc write 0x10000000 8000 2000
+=> reset
+```
+
+That needs a bootloader that gets as far as a prompt. Both this image's U-Boot
+(Ctrl+C within two seconds) and the mainline track's (any key) do. Maskrom is
+for when neither does.
+
+**Restoring only the bootloader is seconds, not a 6 GB write.** From a host,
+if the partitions and the root filesystem are intact and it is the boot chain
+you broke, write the three blobs back where the layout puts them:
 
 ```sh
 RK=sources/external-bsp/rkbin/tools/rkdeveloptool

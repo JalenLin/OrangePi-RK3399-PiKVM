@@ -494,17 +494,49 @@ The rule that follows is the one worth remembering: **do not mix tracks across
 media.** A mainline bootloader cannot boot a BSP-track card, and the reverse
 combination boots the card the BSP way, using none of this.
 
-**One more thing follows, and has not been exercised yet:** on this track
-the SD and eMMC images no longer need to differ at all. The GUID split exists
-only because the BSP U-Boot picks `root=` from the medium
-([emmc.md](emmc.md)); with `extlinux.conf` naming it, one image would boot from
-either. The split is still built, because the BSP track is still the default.
+**The GUID split cannot be dropped, and finding that out cost a board's
+afternoon.** The tempting conclusion from the command line above is that the
+SD and eMMC images no longer need to differ, since `root=` no longer comes
+from a bootloader guessing at the medium. That is wrong, and it is wrong
+because the split was solving two problems, not one:
 
-What was verified is the content: the loader sectors, `extlinux.conf`, the
-kernel and the bootable flag, assembled onto the eMMC exactly as
-`mkimage.sh` writes them, and booted. Writing the finished
-`*-uboot-mainline.img` to a device as a single `dd` and booting *that* has not
-been done.
+1. the BSP U-Boot picking `root=` from the medium, with a thirteen-character
+   prefix — **mainline does fix this**
+2. the kernel's own `PARTUUID=` lookup being ambiguous when two attached media
+   carry the same GUID — **mainline does nothing about this**
+
+Demonstrated rather than argued. With an SD-family image on the eMMC and an
+ordinary SD-family card in the slot:
+
+```
+mmcblk0p4  614e0000-0000-4b53-8000-1d28000054a9    <- eMMC
+mmcblk1p4  614e0000-0000-4b53-8000-1d28000054a9    <- the card
+```
+
+Two partitions, two devices, one GUID. The kernel took the eMMC's and dropped
+into emergency mode when it turned out to be the damaged one. A full
+36-character GUID is narrower than the BSP's thirteen characters — it only
+collides when two media carry literally the same image — but that is exactly
+the "installed to eMMC and left the card in" case, which is the common one.
+
+So `make emmc-image UBOOT_TRACK=mainline` exists and is what belongs on eMMC,
+and the two families stay.
+
+### The finished image, booted
+
+`orangepi-rk3399-pikvm-rk612-emmc-uboot-mainline.img`, written to the eMMC as
+a single `dd` and read back byte-identical, with the card removed:
+
+```
+/dev/mmcblk0p4
+root=PARTUUID=615e0000-0000-4b53-8000-1d28000054a9 …   (from extlinux.conf)
+running, 0 failed units
+kvmd, kvmd-otg, kvmd-nginx, kvmd-janus, kvmd-media all active
+mmcblk0p5  8.4G  /var/lib/kvmd/msd                     (grown on first boot)
+DV timings: 1920x1080
+```
+
+So the whole path is the artifact, not a hand-assembly of its parts.
 
 ### What it buys, and it is four patches of one kind
 
