@@ -538,12 +538,41 @@ DV timings: 1920x1080
 
 So the whole path is the artifact, not a hand-assembly of its parts.
 
-Its SD counterpart, `orangepi-rk3399-pikvm-rk612-uboot-mainline.img`, builds
-and is byte-checked but **has not been booted**. A card is its proper home,
-and on a board whose eMMC already carries a loader the BootROM never reaches
-one — so testing it means erasing the eMMC's loader first, which was not worth
-doing to a working board. Everything it contains is shared with the eMMC image
-that was booted, apart from six GUIDs.
+### And from an SD card, which is a different path
+
+Everything above ran with the BootROM loading mainline from eMMC. Loading it
+from a **card** is not the same path, and it was worth checking rather than
+assuming: `u-boot,spl-boot-order = "same-as-spl", &sdhci, &sdmmc` has to
+resolve `same-as-spl` to the right device, and that resolution had only ever
+been exercised one way round.
+
+Tested by erasing the eMMC's loader region so the BootROM falls through to the
+card, with the card carrying `*-uboot-mainline.img`'s loader sectors and
+`/boot`:
+
+```
+U-Boot SPL 2025.07
+Trying to boot from MMC2                      <- MMC1 when it came off eMMC
+...
+Scanning bootdev 'mmc@fe320000.bootdev':      <- the card
+  1  extlinux  ready  mmc  4  …  /boot/extlinux/extlinux.conf
+** Booting bootflow 'mmc@fe320000.bootdev.part_4' with extlinux
+```
+
+`MMC2` rather than `MMC1` is the whole answer: SPL followed the device it was
+loaded from, U-Boot proper then found the card's `extlinux.conf`, and the
+board came up on `/dev/mmcblk1p4` — running, no failed units, all five kvmd
+services, the MSD store at 22.6 G, 1080p, `/dev/hidg0..2`, `/dev/mpp_service`.
+
+Note what that test needs, since it is the reason it came last: the eMMC's
+loader has to be gone, because the BootROM reads it first and mainline's SPL
+then stays on the device that loaded it. There is no way to run a card's
+bootloader on a board whose eMMC has one.
+
+`orangepi-rk3399-pikvm-rk612-uboot-mainline.img` was the source of the loader
+and `/boot` used above, but has not been written to a card as a single `dd`
+and booted, for that same reason — the board would have had to give up its
+eMMC install for it.
 
 ### What it buys, and it is four patches of one kind
 
