@@ -1,8 +1,8 @@
 # The patches, and why each one exists
 
-Thirteen kernel patches and two userspace ones. They are applied in filename
-order by plain `git apply` — no fuzz, no `--3way` — so a patch either applies
-or the build stops.
+Thirteen kernel patches, one U-Boot patch and two userspace ones. They are
+applied in filename order by plain `git apply` — no fuzz, no `--3way` — so a
+patch either applies or the build stops.
 
 They are not all the same kind of thing, and the split is deliberate:
 
@@ -12,6 +12,7 @@ They are not all the same kind of thing, and the split is deliberate:
 | **0002** | MMC node names | ours; works around the vendor U-Boot |
 | **0003–0012** | driver fixes | bugs anyone on this hardware hits. One fix per patch, so they stay submittable |
 | **0013** | codec rail voltages | a defect the upstream DTS has too — mainline's copy of this board file is byte-for-byte identical |
+| **uboot/0001** | autoboot delay and console rate | two defconfig lines; the difference between a debuggable board and one you can only recover over USB |
 | **libv4l-rkmpp/0001–0002** | userspace | applied inside the rootfs build |
 
 If you add one, keep that distinction. A patch that mixes a board choice with
@@ -627,6 +628,42 @@ the right voltage; pinning them would change nothing measurable, so they are
 left alone.
 
 Applies standalone.
+
+## uboot/0001 — an autoboot you can interrupt, at a rate you can type at
+
+Two lines of the vendor's `configs/rk3399_defconfig`.
+
+**`CONFIG_BOOTDELAY=0` → `2`.** The vendor defconfig boots straight through,
+so this image had no U-Boot prompt at all — no way to choose a different boot
+device, load a kernel over the network, or read a partition back when the
+kernel is the broken thing. That is not a theoretical loss. An experiment that
+left a non-booting bootloader on the eMMC had no software route back at all,
+because the BootROM reads eMMC before it looks at the card (see
+[emmc.md](emmc.md)) and nothing in between ever stopped to ask; recovery meant
+maskrom mode, a USB-C cable and the MASKROM key.
+
+The stop key is **Ctrl+C**, not any key — this U-Boot is built with
+`CONFIG_AUTOBOOT_KEYED`, and it says so:
+
+```
+Hit key to stop autoboot('CTRL+C'):  2  1  0
+```
+
+`bootcmd` is `boot_android ${devtype} ${devnum};bootrkp;run distro_bootcmd;`
+and there is no `boot` command in this build, so `run bootcmd` is how you
+continue by hand.
+
+**`CONFIG_BAUDRATE=1500000` → `115200`.** The delay is only worth having if
+the prompt can be typed at, and on this board's wiring 1500000 reads cleanly
+but corrupts on write — which is why the kernel console was moved down to
+115200 in the first place (patch 0001's `bootargs`). U-Boot was the last thing
+left at the high rate, so the console changed speed halfway through every boot
+and the half you could type into was the half that had already finished. Both
+halves are 115200 now, and `docs/logs/` stops needing two terminals.
+
+What still speaks at 1500000 is `trust.img`, the prebuilt BL31 blob from
+`rkbin`. Its handful of lines arrive as garbage and are the only thing left
+that does.
 
 ## pikvm.config — kernel options
 

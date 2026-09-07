@@ -13,11 +13,17 @@ S := build/scripts
 
 KERNEL_TRACK ?= rk612
 export KERNEL_TRACK
+# bsp | mainline. Only bsp boots; see docs/roadmap.md.
+UBOOT_TRACK ?= bsp
+export UBOOT_TRACK
 IMG      := output/orangepi-rk3399-pikvm-$(KERNEL_TRACK).img
 EMMC_IMG := output/orangepi-rk3399-pikvm-$(KERNEL_TRACK)-emmc.img
 # Shipped prebuilt in the vendor blob repo that `make uboot` already fetches,
 # so the maskrom route needs nothing installed on the host.
 RKDEV    := sources/external-bsp/rkbin/tools/rkdeveloptool
+# It needs raw USB access. A container with the USB bus bound in is cheaper
+# than sudo, and this build already requires docker for everything else.
+RKRUN    := docker run --rm --privileged -v /dev/bus/usb:/dev/bus/usb -v $(CURDIR):/work -w /work opi-pikvm/rkdev $(RKDEV)
 
 .PHONY: all uboot kernel rootfs image emmc-image flash flash-emmc images clean distclean clean-docker footprint help
 
@@ -62,12 +68,14 @@ flash:
 flash-emmc:
 	@test -f "$(EMMC_IMG)" || { echo "$(EMMC_IMG) does not exist - build it with 'make emmc-image'"; exit 1; }
 	@test -x "$(RKDEV)" || { echo "$(RKDEV) is missing - run 'make uboot' first"; exit 1; }
-	@echo "The board must be in maskrom mode. Devices the tool can see:"
-	@sudo $(RKDEV) ld
+	@docker image inspect opi-pikvm/rkdev >/dev/null 2>&1 || docker build -t opi-pikvm/rkdev -f build/docker/Dockerfile.rkdev build/docker
+	@lsusb | grep -q "2207:" || { echo "no Rockchip device on USB - hold MASKROM and power on, and plug the board close to the root hub (see docs/emmc.md)"; exit 1; }
+	@echo "Board in maskrom:"; lsusb | grep "2207:"
 	@read -p "Type YES to overwrite that board's eMMC: " a; [ "$$a" = YES ] || exit 1
-	sudo $(RKDEV) db $$(ls output/uboot/rk3399_loader_*.bin | head -1)
-	sudo $(RKDEV) wl 0 $(EMMC_IMG)
-	sudo $(RKDEV) rd
+	$(RKRUN) db $$(ls output/uboot/rk3399_loader_*.bin | head -1)
+	$(RKRUN) td
+	$(RKRUN) wl 0 $(EMMC_IMG)
+	$(RKRUN) rd
 
 # What has actually been built, so you can tell the cards apart.
 images:
@@ -87,7 +95,7 @@ distclean: clean clean-docker
 # aarch64 rootfs on x86_64 means the host kernel has to know how to run
 # aarch64 binaries. This removes both.
 clean-docker:
-	-docker rmi -f opi-pikvm/kbuild:20.04 opi-pikvm/rootfs:latest
+	-docker rmi -f opi-pikvm/kbuild:20.04 opi-pikvm/rootfs:latest opi-pikvm/rkdev
 	-docker run --privileged --rm tonistiigi/binfmt --uninstall qemu-aarch64
 	-docker rmi -f tonistiigi/binfmt:latest
 

@@ -141,7 +141,8 @@ it: it carries your configuration — Wi-Fi credentials, changed passwords, an
 
 ### 3. Maskrom mode, from the host over USB
 
-For a board with no card and no running system.
+For a board with no card and no running system — and the route back from a
+bootloader that does not boot, which is the only reason it is not last.
 
 ```sh
 make flash-emmc            # needs the board in maskrom, on the Type-C port
@@ -154,13 +155,50 @@ vendor blob repo (`sources/external-bsp/rkbin/tools/rkdeveloptool`, which
 `make uboot` fetches) and the loader is `rk3399_loader_v1.22.119.bin`, which
 `make uboot` packs and copies to `output/uboot/`. Nothing to install.
 
-Getting the board into maskrom is a physical action: the vendor's own
-instructions, in `board/rockchip/evb_rk3399/README` in the BSP U-Boot tree,
-are *"power on (or reset with RESET KEY) with MASKROM KEY pressed"*.
+Getting the board in is physical, and the vendor's own instructions
+(`board/rockchip/evb_rk3399/README` in the BSP U-Boot tree) are the whole of
+it: **power on, or press RESET, with the MASKROM key held.** The host then
+shows
 
-This is the route back from a bootloader that does not boot — see the boot
-order above — so it is worth knowing where that key is on your board before
-you need it, rather than after.
+```
+Bus 003 Device 034: ID 2207:330c Fuzhou Rockchip ... RK3399 in Mask ROM mode
+```
+
+Four things this cost time to learn, all of them verified here on a board that
+genuinely needed rescuing:
+
+* **Plug the board close to the root hub.** Behind two levels of USB hub the
+  loader downloads fine and then the board fails to come back:
+  `usb 3-2.1.2-port1: unable to enumerate USB device`, and `rkdeveloptool`
+  reports no device at all. One hub level worked.
+* **`ld` does not exist** in the bundled `rkdeveloptool` 1.2. Use `td`.
+* **`td` fails in maskrom and succeeds after `db`.** "Test Device failed!"
+  before the loader is downloaded is normal; `Test Device OK.` afterwards is
+  the signal that the board is in loader mode and will accept `wl`.
+* **Keep the 12 V supply connected.** The Type-C port is not a power source
+  for this board: PiKVM puts it in device role, so the PHY classifies the
+  cable as an SDP and takes 500 mA —
+  `phy usb2phy@e450.6: charger = USB_SDP_CHARGER` in the kernel log — which is
+  not enough to run Linux. On USB power alone this board reaches systemd and
+  hard-resets at about eight seconds, over and over, with no panic and nothing
+  in the log to explain it.
+
+**Restoring only the bootloader is seconds, not a 6 GB write.** If the
+partitions and the root filesystem are intact and it is the boot chain you
+broke, write the three blobs back where the layout puts them:
+
+```sh
+RK=sources/external-bsp/rkbin/tools/rkdeveloptool
+$RK db    output/uboot/rk3399_loader_v1.22.119.bin
+$RK wl 64    output/uboot/idbloader.img
+$RK wl 24576 output/uboot/uboot.img
+$RK wl 32768 output/uboot/trust.img
+$RK rd
+```
+
+`rkdeveloptool` needs raw USB access, so run it as root — or in a container
+with `--privileged -v /dev/bus/usb:/dev/bus/usb`, which is how `make
+flash-emmc` avoids asking for a password it does not need for anything else.
 
 Routes 1 and 2 need none of this, which is why they are listed first.
 

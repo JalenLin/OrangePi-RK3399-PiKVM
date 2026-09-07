@@ -126,21 +126,33 @@ is in [emmc.md](emmc.md).
 You will want it, especially the first time. The debug UART is a 3-pin header
 on the board.
 
-**The baud rate changes mid-boot.** U-Boot is compiled for **1500000**; the
-kernel and the login prompt run at **115200**. So a terminal fixed at either
-rate shows garbage for the other half of the boot. That is expected, not a
-fault.
-
-1500000 reads fine on this wiring but corrupts on write, which is why the
-kernel console was moved down — a console you cannot type into is not a
-console.
+**One rate, 115200, end to end**: U-Boot, the kernel and the login prompt.
 
 ```sh
-picocom -b 115200 /dev/ttyUSB0     # kernel and login
-picocom -b 1500000 /dev/ttyUSB0    # U-Boot
+picocom -b 115200 /dev/ttyUSB0
 ```
 
-`docs/logs/rk612-boot-ok.log` is a full healthy boot to diff against.
+It did not use to be. RK3399 boards ship a 1500000 console and the vendor
+defconfig keeps it, but on this board's wiring 1500000 reads cleanly and
+corrupts on write — a console you cannot type into — so the kernel was moved
+down to 115200 and U-Boot followed (`patches/uboot/0001`). The only thing
+still talking at 1500000 is the prebuilt BL31 blob, whose handful of lines
+arrive as garbage. Expect them.
+
+**U-Boot stops for you.** Two seconds, and the key is Ctrl+C:
+
+```
+Hit key to stop autoboot('CTRL+C'):  2  1  0
+=>
+```
+
+Worth knowing before you need it. There is no `boot` command in this build —
+`run bootcmd` continues. See docs/patches.md for why the delay exists at all;
+the short version is that a board with no U-Boot prompt and a bad bootloader
+has no software way back.
+
+`docs/logs/rk612-boot-ok.log` is a full healthy boot to diff against. It
+predates the console change, so its U-Boot half was captured at 1500000.
 
 ## First boot
 

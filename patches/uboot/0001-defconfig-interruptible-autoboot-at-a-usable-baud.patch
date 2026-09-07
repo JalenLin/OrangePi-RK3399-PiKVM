@@ -1,0 +1,49 @@
+u-boot: an autoboot you can actually interrupt, at a rate you can type at
+
+Two lines of configs/rk3399_defconfig, and between them they are the
+difference between a board you can debug and a board you can only recover
+with a USB cable and a button.
+
+CONFIG_BOOTDELAY=0. The vendor defconfig boots straight through, so there is
+no U-Boot prompt on this image at all - no way to pick a different boot
+device, load a kernel over the network, or read back a partition when the
+kernel is the thing that is broken. It was learned the hard way: an
+experiment that left a non-booting bootloader on the eMMC had no software
+route back, because the BootROM reads eMMC before it looks at the card (see
+docs/emmc.md) and nothing in between ever stops to ask. Recovery meant
+maskrom mode, a USB-C cable and the MASKROM key. Two seconds of autoboot
+delay is the cheapest insurance in this tree.
+
+CONFIG_BAUDRATE=1500000. The delay is only worth having if the "hit any key"
+can be answered, and on this board's wiring 1500000 reads cleanly but
+corrupts on write - which is exactly why the kernel console was already moved
+down to 115200 (bootargs, patch 0001 of the kernel series). U-Boot was the
+last thing left at the high rate, so the console changed speed halfway
+through every boot and the half you could type into was the half that had
+already finished. Both halves are 115200 now.
+
+The trust.img blob still prints its own lines at 1500000; those few bytes
+arrive as garbage and are the only thing left that does.
+
+diff --git a/configs/rk3399_defconfig b/configs/rk3399_defconfig
+index c83fd8aa..4296b014 100755
+--- a/configs/rk3399_defconfig
++++ b/configs/rk3399_defconfig
+@@ -13,7 +13,7 @@ CONFIG_DEFAULT_DEVICE_TREE="rk3399-evb"
+ CONFIG_DEBUG_UART=y
+ CONFIG_FIT=y
+ CONFIG_SPL_LOAD_FIT=y
+-CONFIG_BOOTDELAY=0
++CONFIG_BOOTDELAY=2
+ CONFIG_SYS_CONSOLE_INFO_QUIET=y
+ # CONFIG_DISPLAY_CPUINFO is not set
+ CONFIG_ANDROID_BOOTLOADER=y
+@@ -96,7 +96,7 @@ CONFIG_SDRAM_COMMON_CAP_DETECT=y
+ CONFIG_SDRAM_COMMON_OSREG=y
+ CONFIG_SDRAM_COMMON_MSCH_RK3399=y
+ CONFIG_DM_RESET=y
+-CONFIG_BAUDRATE=1500000
++CONFIG_BAUDRATE=115200
+ CONFIG_DEBUG_UART_BASE=0xFF1A0000
+ CONFIG_DEBUG_UART_CLOCK=24000000
+ CONFIG_DEBUG_UART_SHIFT=2

@@ -1,0 +1,14 @@
+# Just enough userland to run the vendor's prebuilt rkdeveloptool.
+#
+# The tool itself is not built here - it ships as an x86-64 binary in the rkbin
+# blob repository that `make uboot` already fetches
+# (sources/external-bsp/rkbin/tools/rkdeveloptool). All it needs is libusb, and
+# raw access to the USB bus, which is why `make flash-emmc` runs it in a
+# container with --privileged and /dev/bus/usb bound in rather than under sudo:
+# this build needs docker anyway and needs a password for nothing else.
+FROM ubuntu:20.04
+ENV DEBIAN_FRONTEND=noninteractive
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        libusb-1.0-0 libudev1 \
+    && rm -rf /var/lib/apt/lists/*
+WORKDIR /work

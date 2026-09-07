@@ -4,12 +4,18 @@ Run these in order on the real board. Each step tells you which of the
 project's unverified assumptions was wrong, and most of them can be fixed
 without rebuilding the whole image.
 
-Serial console: **1500000 8N1** on the debug UART (RK3399 boards use this
-non-standard rate; 115200 will show you garbage and look like a dead board).
+Serial console: **115200 8N1** on the debug UART, for the whole boot. RK3399
+boards conventionally use 1500000 and the vendor U-Boot defaults to it, but
+this one writes corrupt at that rate, so both U-Boot and the kernel were moved
+down (`patches/uboot/0001`). The prebuilt BL31 blob still prints its own lines
+at 1500000; those few bytes of garbage are expected.
 
 ```sh
-picocom -b 1500000 /dev/ttyUSB0
+picocom -b 115200 /dev/ttyUSB0
 ```
+
+U-Boot waits two seconds for Ctrl+C, so you can stop at a prompt when the
+kernel is the thing that is broken.
 
 ## 1. Does it boot at all?
 

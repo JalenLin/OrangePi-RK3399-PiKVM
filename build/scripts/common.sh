@@ -75,12 +75,23 @@ apply_patches() {
     done
 }
 
+# Build the cross-build container if it is missing - or if its Dockerfile has
+# been edited since the image was built. Existence alone was the old test, and
+# it meant a change to Dockerfile.kbuild was silently ignored on every machine
+# that had already built once: the next build ran in the old container and
+# failed on a package that had been added specifically to fix it.
 ensure_kbuild_image() {
-    if ! docker image inspect "${KBUILD_IMAGE}" >/dev/null 2>&1; then
+    local dockerfile="${ROOT}/build/docker/Dockerfile.kbuild" built
+    if built="$(docker image inspect -f '{{.Created}}' "${KBUILD_IMAGE}" 2>/dev/null)"; then
+        if [[ "$(date -d "${built}" +%s 2>/dev/null || echo 0)" -ge \
+              "$(stat -c %Y "${dockerfile}")" ]]; then
+            return 0
+        fi
+        msg "${KBUILD_IMAGE} is older than its Dockerfile, rebuilding"
+    else
         msg "building ${KBUILD_IMAGE}"
-        docker build -t "${KBUILD_IMAGE}" -f "${ROOT}/build/docker/Dockerfile.kbuild" \
-            "${ROOT}/build/docker"
     fi
+    docker build -t "${KBUILD_IMAGE}" -f "${dockerfile}" "${ROOT}/build/docker"
 }
 
 # Run a command inside the cross-build container, as the calling user so the

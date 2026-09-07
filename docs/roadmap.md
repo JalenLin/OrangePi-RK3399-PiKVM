@@ -331,6 +331,110 @@ unofficial machinery under a working stream. Route B - a VEPU2 encoder in
 `hantro` - is still the only version of this that ends with nothing of ours
 in userspace at all.
 
+## Mainline U-Boot — evaluated, builds, not adopted
+
+The bootloader is a separate question from the kernel, and a smaller one. This
+is where it got to.
+
+**Mainline supports this board.** U-Boot v2025.07 has
+`configs/orangepi-rk3399_defconfig` and `arch/arm/dts/rk3399-orangepi-u-boot.dtsi`,
+the latter carrying `rk3399-sdram-ddr3-1333.dtsi` and
+`vdd_log { regulator-init-microvolt = <950000> }`. `make uboot
+UBOOT_TRACK=mainline` builds it, with BL31 from the same `rkbin` the BSP track
+already fetches. The container needed four packages it did not have:
+`python3-setuptools` and `python3-dev` for binman's `pylibfdt`,
+`libgnutls28-dev` and `uuid-dev` for `tools/mkeficapsule`.
+
+**What it would buy is four patches, all of one kind.** Every one of them
+exists because the BSP U-Boot calls `init_kernel_dtb()` — it reads the
+*kernel's* device tree and drives its own hardware from it, so vendor-only
+properties have to be smuggled into a file that is otherwise Linux's:
+
+* kernel **0002** in full — the `dwmmc@`/`sdhci@` node renames exist only so
+  the BSP U-Boot does not bind a second device for the same controller
+* from kernel **0001**: `rockchip,pwm_id` and `rockchip,pwm_voltage` on
+  `vdd_log`, `regulator-init-microvolt` on LDO_REG4, and the deletion of
+  `stdout-path`
+
+Mainline U-Boot has its own control DTB and never looks at the kernel's, so
+all four become dead weight — and the `vdd_log` value it needs is already in
+its own `-u-boot.dtsi`, upstream, where it belongs.
+
+**The layout cost is smaller than it looks.** Two things were expected to be
+hard and are not:
+
+* *Where SPL finds U-Boot.* Mainline defaults to sector 0x4000; this image's
+  `uboot` partition starts at 0x6000 and is 4 MiB against an itb of 1.2.
+  `CONFIG_SYS_MMCSD_RAW_MODE_U_BOOT_SECTOR=0x6000` in
+  `config/uboot-fragments/pikvm.config` is the whole fix, and every sector in
+  [image-layout.md](image-layout.md) stays put. `trust` becomes unused —
+  mainline packs BL31 into the itb.
+* *How the kernel gets loaded.* Mainline cannot read Rockchip's `boot.img`
+  and its `resource.img`, so this looked like it needed a new filesystem
+  partition. It does not: bootstd scans `/` **and `/boot/`** on every
+  partition it can read (`default_prefixes[]` in `boot/bootstd-uclass.c`), and
+  the rootfs is already `-O ^metadata_csum` ext4 that U-Boot reads. So
+  `/boot/Image`, `/boot/*.dtb` and `/boot/extlinux/extlinux.conf` on partition
+  4 are enough, with the raw `boot` partition simply left alone. That would
+  also turn a kernel update from `dd` over a partition into a file copy, which
+  is worth having on its own.
+
+  Free side effect: `root=` moves into `extlinux.conf`, where it is a full
+  36-character GUID chosen by us, instead of the hardcoded 13-character prefix
+  the BSP U-Boot compiles in (see [emmc.md](emmc.md)).
+
+**Where it stopped.** On hardware, TPL runs and is correct — both DDR3
+channels at 666 MHz, 1024 MB each, `Trying to boot from BOOTROM` /
+`Returning to boot ROM...` — then SPL loads the FIT from sector 0x6000 and
+verifies it:
+
+```
+U-Boot TPL 2025.07
+Channel 0: DDR3, 666MHz
+Channel 1: DDR3, 666MHz
+U-Boot SPL 2025.07
+Trying to boot from MMC1
+## Checking hash(es) for config config-1 ... OK
+```
+
+and then nothing more was seen.
+
+**"Nothing more was seen" is not the same as "it hung", and the first reading
+of this was wrong.** TPL and SPL print at `CONFIG_BAUDRATE`. U-Boot proper
+takes its rate from `stdout-path`, and the shared board DTS says
+`serial2:1500000n8` — as does the `rkbin` BL31 blob. The capture was at
+115200. So the silence is exactly what a correct boot would also look like
+from the wrong side of a baud change, and the follow-up probes at 1500000
+failed for the *other* documented reason: this board's wiring corrupts writes
+at that rate, so the keystrokes never arrived intact.
+`patches/uboot-mainline/0001` puts mainline's console at 115200 so the next
+attempt is legible. Whether there is a real stall at the BL31 handoff is, as
+of now, unknown.
+
+**What it costs to find out, and why that set the pace.** There is no cheap
+iteration here. The BootROM reads eMMC before the card, and mainline's SPL
+stays on the device it was loaded from
+(`u-boot,spl-boot-order = "same-as-spl", &sdhci, &sdmmc`), so mainline U-Boot
+on the eMMC is reached before any card and a card cannot override it. Testing
+it means the board only comes back through maskrom — which is now a verified,
+seconds-long procedure ([emmc.md](emmc.md)), but it needs a person holding a
+button.
+
+The two things that make the next attempt cheaper are already done: the
+console patch above, and `patches/uboot/0001`, which gives the *BSP* U-Boot a
+two-second Ctrl+C autoboot delay at a rate you can type at — so a board that
+boots at all is now debuggable without a USB cable.
+
+**Next, in order:**
+
+1. Re-run the hardware test with `patches/uboot-mainline/0001` applied and the
+   capture at 115200 from power-on. This may be the whole answer.
+2. If it really does stall at the handoff: build BL31 from mainline TF-A
+   (`PLAT=rk3399`) instead of `rkbin`'s 2019 `v1.28` blob. That needs an
+   `arm-none-eabi` compiler in the container for the Cortex-M0 firmware.
+3. Only then the `/boot` + `extlinux.conf` work, which is the part that
+   touches `build-kernel.sh` and `mkimage.sh`.
+
 ---
 
 ## Why this branch, and what it costs

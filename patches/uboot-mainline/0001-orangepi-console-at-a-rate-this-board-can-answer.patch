@@ -1,0 +1,35 @@
+u-boot: put mainline's console on the rate this board can be typed at
+
+The base device tree - dts/upstream/src/arm64/rockchip/rk3399-orangepi.dts,
+shared with Linux - says
+
+    stdout-path = "serial2:1500000n8";
+
+and U-Boot proper honours the rate in stdout-path, so it overrides
+CONFIG_BAUDRATE the moment it takes over from SPL. On this board that is the
+rate that reads cleanly and corrupts on write, which makes the U-Boot prompt
+unusable in exactly the situation you need it.
+
+It also made mainline look like it was hanging. TPL and SPL print at
+CONFIG_BAUDRATE, so a terminal at 115200 sees the DDR lines and the FIT load
+and then nothing at all - because BL31 (rkbin's blob) and U-Boot proper are
+both talking at 1500000 by then. That silence was read as a stall at the SPL
+handoff; it is not evidence of one.
+
+The value in the kernel's copy of this file is right for the kernel's own
+console, so this belongs here rather than in the shared DTS.
+
+diff --git a/arch/arm/dts/rk3399-orangepi-u-boot.dtsi b/arch/arm/dts/rk3399-orangepi-u-boot.dtsi
+index b7452eca..86fdba37 100644
+--- a/arch/arm/dts/rk3399-orangepi-u-boot.dtsi
++++ b/arch/arm/dts/rk3399-orangepi-u-boot.dtsi
+@@ -21,3 +21,9 @@
+ &vdd_log {
+ 	regulator-init-microvolt = <950000>;
+ };
++
++/ {
++	chosen {
++		stdout-path = "serial2:115200n8";
++	};
++};
