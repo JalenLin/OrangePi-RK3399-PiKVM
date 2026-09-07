@@ -11,10 +11,18 @@ Before=local-fs.target var-lib-kvmd-msd.mount kvmd.service
 # directory". The mount then never ran, so kvmd reported storage: null and
 # error-looped on the remount helper until the next reboot.
 #
-# The name is the escaped form of /dev/disk/by-partuuid/<MSD_PART_UUID>. It is
-# hardcoded because that GUID is: config/board.conf pins it and /etc/fstab
-# names the partition by it.
+# The names are the escaped forms of /dev/disk/by-partuuid/<MSD_PART_UUID>,
+# and they are hardcoded because that GUID is: config/board.conf pins it and
+# /etc/fstab names the partition by it.
+#
+# Both media are listed because the GUID is what tells them apart - 614e on an
+# SD card, 615e on eMMC, a distinction the vendor U-Boot forces on us (see the
+# comment in board.conf). Only one of these units will ever exist on a given
+# board. Naming the other one costs nothing: Before= on a unit that does not
+# exist is ordering against nothing, not an error, and it keeps this file the
+# same on both images.
 Before=systemd-fsck@dev-disk-by\x2dpartuuid-614e0000\x2d0000\x2d4b53\x2d8000\x2d1d28000054aa.service
+Before=systemd-fsck@dev-disk-by\x2dpartuuid-615e0000\x2d0000\x2d4b53\x2d8000\x2d1d28000054aa.service
 ConditionPathExists=!/var/lib/pikvm/.msd-expanded
 
 [Service]

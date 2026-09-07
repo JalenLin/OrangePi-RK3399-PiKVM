@@ -16,8 +16,10 @@ picocom -b 1500000 /dev/ttyUSB0
 If U-Boot prints but the kernel never starts, the boot partition is the
 suspect — `boot.img` is written raw at sector 49152 and nothing validates it.
 If the kernel starts but panics on mounting root, the partition GUID is wrong;
-check `sgdisk -i 4 /dev/mmcblk1` reports
-`614e0000-0000-4b53-8000-1d28000054a9`.
+check `sfdisk --dump /dev/mmcblk1` reports
+`614e0000-0000-4b53-8000-1d28000054a9` on partition 4 — or `615e…54a9` on
+`/dev/mmcblk0` if you are booting the eMMC, where the prefix differs on
+purpose (see [emmc.md](emmc.md)).
 
 ## 2. Is the bridge chip actually at 0x0f?
 

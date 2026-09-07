@@ -1,4 +1,4 @@
-# The SD card image
+# The image layout
 
 The layout is the vendor SDK's, sector for sector
 (`OrangePiRK3399_scripts/lib/build_image.sh`). This is not a style choice:
@@ -43,10 +43,17 @@ can read.
 last in the table for exactly that reason. So the card size you choose becomes
 ISO storage and nothing else.
 
-**The partition GUIDs are functional.** U-Boot's bootargs name the rootfs by
-`614e0000-0000-4b53-8000-1d28000054a9`, and `/etc/fstab` names the MSD store
-by `…54aa`. `mkimage.sh` sets both explicitly with `sgdisk`. Change them and
-the board stops at "rootfs not found".
+**The partition GUIDs are functional, and the prefix encodes the medium.**
+U-Boot's bootargs name the rootfs by `614e0000-0000-4b53-8000-1d28000054a9`
+and `/etc/fstab` names the MSD store by `…54aa`; `mkimage.sh` sets both
+explicitly with `sgdisk`. Change them and the board stops at "rootfs not
+found".
+
+`614e` is the SD card family. An image for the onboard eMMC uses `615e`
+instead, and has to, because the BSP U-Boot picks `root=` from a hardcoded
+branch on the medium it booted from. That is `make emmc-image`, and
+[emmc.md](emmc.md) is where it is explained. Nothing else about the layout
+changes: same sectors, same partition names, same sizes.
 
 ## /etc/fstab
 

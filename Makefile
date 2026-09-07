@@ -1,8 +1,10 @@
 # OrangePi RK3399 PiKVM image builder
 #
 #   make all             - bootloader, kernel, rootfs, then the image
+#   make emmc-image      - the same build, laid out for this board's eMMC
 #   make images          - list what has been built
 #   make flash SD=/dev/sdX
+#   make flash-emmc      - write the eMMC image over USB, board in maskrom
 #
 # Each step is resumable: rerunning a target reuses what is already in
 # sources/ and output/. See docs/building.md.
@@ -11,9 +13,13 @@ S := build/scripts
 
 KERNEL_TRACK ?= rk612
 export KERNEL_TRACK
-IMG := output/orangepi-rk3399-pikvm-$(KERNEL_TRACK).img
+IMG      := output/orangepi-rk3399-pikvm-$(KERNEL_TRACK).img
+EMMC_IMG := output/orangepi-rk3399-pikvm-$(KERNEL_TRACK)-emmc.img
+# Shipped prebuilt in the vendor blob repo that `make uboot` already fetches,
+# so the maskrom route needs nothing installed on the host.
+RKDEV    := sources/external-bsp/rkbin/tools/rkdeveloptool
 
-.PHONY: all uboot kernel rootfs image flash images clean distclean clean-docker footprint help
+.PHONY: all uboot kernel rootfs image emmc-image flash flash-emmc images clean distclean clean-docker footprint help
 
 all: uboot kernel rootfs image
 
@@ -29,6 +35,13 @@ rootfs:
 image:
 	@$(S)/mkimage.sh
 
+# Not part of `all`: most boards will only ever be flashed to a card, and this
+# reassembles from the same output/ the SD image was built from, so it is a
+# three-minute afterthought rather than a second build. The two images differ
+# in six partition GUIDs and nothing else - see config/board.conf.
+emmc-image:
+	@TARGET_MEDIUM=emmc $(S)/mkimage.sh
+
 # Deliberately not wired into `all`: this writes to a block device.
 flash:
 	@test -n "$(SD)" || { echo "usage: make flash SD=/dev/sdX"; exit 1; }
@@ -40,6 +53,21 @@ flash:
 	@echo "Writing $(IMG)"
 	sudo dd if=$(IMG) of=$(SD) bs=4M status=progress conv=fsync
 	sync
+
+# eMMC has no device node on this machine - the board itself is the target,
+# over the Type-C port, with the BootROM in maskrom mode answering. `db` puts
+# the loader in DRAM, `wl 0` writes the image from sector 0. docs/emmc.md has
+# how to get the board into maskrom, and two other ways to do this that do not
+# need it.
+flash-emmc:
+	@test -f "$(EMMC_IMG)" || { echo "$(EMMC_IMG) does not exist - build it with 'make emmc-image'"; exit 1; }
+	@test -x "$(RKDEV)" || { echo "$(RKDEV) is missing - run 'make uboot' first"; exit 1; }
+	@echo "The board must be in maskrom mode. Devices the tool can see:"
+	@sudo $(RKDEV) ld
+	@read -p "Type YES to overwrite that board's eMMC: " a; [ "$$a" = YES ] || exit 1
+	sudo $(RKDEV) db $$(ls output/uboot/rk3399_loader_*.bin | head -1)
+	sudo $(RKDEV) wl 0 $(EMMC_IMG)
+	sudo $(RKDEV) rd
 
 # What has actually been built, so you can tell the cards apart.
 images:
@@ -73,4 +101,4 @@ footprint:
 	@du -sh sources output .cache 2>/dev/null | sed 's/^/  /'
 
 help:
-	@sed -n '2,7p' Makefile
+	@sed -n '2,9p' Makefile

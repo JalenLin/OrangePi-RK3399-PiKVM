@@ -83,10 +83,11 @@ a time while you are changing things:
 
 | | builds | into | roughly |
 |---|---|---|---|
-| `make uboot` | idbloader / uboot / trust | `output/uboot/` | 2 min |
+| `make uboot` | idbloader / uboot / trust, plus the maskrom loader | `output/uboot/` | 2 min |
 | `make kernel` | Image + DTB, packed as `boot.img` | `output/kernel/`, `output/modules/` | 15 min |
 | `make rootfs` | Arch Linux ARM + PiKVM + `/opt/rkmpp` | `output/rootfs.tar` | 60–90 min |
 | `make image` | the GPT card image | `output/*.img` | 3 min |
+| `make emmc-image` | the same, for the onboard eMMC | `output/*-emmc.img` | 3 min |
 
 `make rootfs` is the slow one and it is slow for a reason: every `pacman`
 invocation runs aarch64 binaries under qemu-user emulation. It is not hung.
@@ -110,6 +111,15 @@ sync
 
 The card must be **at least 8 GB**. Anything past the image is claimed by the
 MSD partition on first boot; see docs/image-layout.md.
+
+## Writing the eMMC instead
+
+The board has 14.6 GB of eMMC and boots from it perfectly well, but it is not
+the same image — the vendor U-Boot hardcodes a different rootfs GUID per
+medium, so `make emmc-image` builds a second file. `make flash-emmc` writes it
+over USB with the board in maskrom mode, and there are two routes that need no
+maskrom at all. All of it, and the boot order that decides which medium wins,
+is in [emmc.md](emmc.md).
 
 ## Serial console
 

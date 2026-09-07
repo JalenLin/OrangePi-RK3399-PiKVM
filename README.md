@@ -20,6 +20,7 @@ Verified on hardware, not inferred from config symbols:
 | **HID** | keyboard and mouse over the Type-C port, verified end to end against a real target |
 | **Mass storage** | ISO/CD-ROM emulation, read back from the target; store expands to fill the card on first boot |
 | **Network** | gigabit ethernet; Wi-Fi on mainline `brcmfmac` (AP6356S) |
+| **Storage** | SD card or the onboard 14.6 GB eMMC, booted and verified on both |
 | **Kernel** | Rockchip BSP 6.12.69, with 13 patches |
 | **Userland** | Arch Linux ARM + PiKVM's own packages, systemd 261 |
 
@@ -34,6 +35,13 @@ you start.
 make all                 # bootloader, kernel, rootfs, image  (~2 h, mostly rootfs)
 make flash SD=/dev/sdX   # prompts before it overwrites anything
 ```
+
+The board also has 14.6 GB of eMMC, and `make emmc-image` builds the same
+image laid out for it — three minutes on top of a build you already have. It
+has to be a separate image: the vendor U-Boot decides `root=` from the medium
+it booted off and hardcodes a different partition GUID for each.
+[docs/emmc.md](docs/emmc.md) has that, the boot order (the card always wins),
+and three ways to write it.
 
 Everything builds in containers; nothing installs on your machine except one
 qemu binfmt handler. Individual steps (`make uboot`, `kernel`, `rootfs`,
@@ -55,6 +63,7 @@ confirming the hardware came up.
 | [docs/hardware.md](docs/hardware.md) | the board itself: pins, rails, GPIO, what is wired to what |
 | [docs/patches.md](docs/patches.md) | every patch and why it exists |
 | [docs/image-layout.md](docs/image-layout.md) | the SD card's partition layout and why it is not negotiable |
+| [docs/emmc.md](docs/emmc.md) | installing to the onboard eMMC instead of a card |
 | [docs/capture.md](docs/capture.md) | EDID, video modes, following a mode change |
 | [docs/known-issues.md](docs/known-issues.md) | what does not work, and what is only cosmetic |
 | [docs/bringup.md](docs/bringup.md) | first-boot checklist |

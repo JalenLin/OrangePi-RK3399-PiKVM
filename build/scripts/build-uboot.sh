@@ -25,5 +25,16 @@ for f in idbloader.img uboot.img trust.img; do
     cp -f "${UBOOT_DIR}/${f}" "${OUT}/"
 done
 
+# make.sh also packs rk3399_loader_*.bin - the same TPL+SPL as idbloader.img,
+# but wrapped in the format the BootROM's USB protocol takes rather than the
+# one it reads off a card. It is what `rkdeveloptool db` pushes into DRAM to
+# make a board in maskrom mode able to write its own eMMC, so it belongs
+# alongside the images rather than only in the source tree. See docs/emmc.md.
+shopt -s nullglob
+loaders=( "${UBOOT_DIR}"/rk3399_loader_*.bin )
+shopt -u nullglob
+(( ${#loaders[@]} )) || die "U-Boot did not produce rk3399_loader_*.bin"
+cp -f "${loaders[@]}" "${OUT}/"
+
 msg "bootloader ready in output/uboot:"
 ls -lh "${OUT}"

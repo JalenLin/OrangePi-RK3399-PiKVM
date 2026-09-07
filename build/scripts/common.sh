@@ -42,13 +42,20 @@ fetch_repo() {
 #
 # Note what this means: anything hand-edited in sources/ is discarded on the
 # next build. Turn it into a patch first.
+#
+# The reset happens whether or not there are any patches, which is not an
+# accident. patches/uboot does not exist, so the early "no patches, nothing to
+# do" return this used to take meant the U-Boot tree was the one tree the
+# build never reset - and it silently shipped bring-up instrumentation for
+# weeks. Every image built in that window carries "MARK: soc_clk_dump done"
+# and a #define DEBUG in lib/initcall.c; docs/logs/rk612-boot-ok.log still
+# shows it. A tree that is reset only when someone remembered to add a patch
+# directory is not a scratch checkout, it is a hiding place.
 apply_patches() {
     local tree="$1" dir="$2"
-    [[ -d "${dir}" ]] || return 0
     shopt -s nullglob
     local ps=( "${dir}"/*.patch )
     shopt -u nullglob
-    (( ${#ps[@]} )) || return 0
 
     # Compare against HEAD, not the index, and restore from HEAD too.
     # "git diff" alone only sees worktree-vs-index, so a tree whose changes
