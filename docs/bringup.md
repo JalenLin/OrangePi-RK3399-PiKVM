@@ -14,7 +14,8 @@ the measurements). The prebuilt BL31 blob still prints its own lines at
 Use a **3.3 V** USB-to-TTL adapter straight onto the header, and check the
 jumper — this header is 3.0 V and a 5 V adapter is over the pads' absolute
 maximum. It will appear to work, because the direction that is out of spec is
-the one you type into. See docs/hardware.md.
+the one you type into. If the adapter is fixed at 5 V, a 1 kΩ resistor in
+series on its TX makes it safe. See docs/hardware.md.
 
 A USB-to-RS232 adapter feeding an RS-232-to-TTL board is fine at 115200; it is
 only worth suspecting if you go back up to 1500000, where those transceivers

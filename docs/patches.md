@@ -659,19 +659,24 @@ continue by hand.
 and every RK3399 defconfig ships it, so this is the line that needs
 justifying. It comes down to the debug header having three pins.
 
-Measured on this board, a USB-to-TTL adapter straight onto the header, 1900
-bytes each way:
+Measured on this board, 1900 bytes each way, on two console rigs — a
+USB-to-TTL adapter straight onto the header, and USB-to-RS232 into an
+SP3232EEN RS-232-to-TTL board:
 
-| | board → host | host → board |
-|---|---|---|
-| **115200** | 1900 / 1900 | 1900 / 1900 |
-| **1500000** | 1900 / 1900 | **1878 / 1900** |
+| | | board → host | host → board | new framing errors |
+|---|---|---|---|---|
+| **115200** | USB-TTL | 1900 / 1900 | 1900 / 1900 | 0 |
+| | RS-232 | 1900 / 1900 | 1900 / 1900 | 0 |
+| **1500000** | USB-TTL | 1900 / 1900 | **1878 / 1900** | **0** |
+| | RS-232 | **1676 / 1900** | **524 / 1900** | **71** |
 
-`/proc/tty/driver/serial` says what happened: `oe:2`, and zero framing or
-parity errors. The bytes arrive intact and the receiver drops them. Send the
-same 1900 bytes in 32-byte chunks 2 ms apart and it is 1900/1900 with the
-overrun count unchanged — so the link is clean at 1500000 and what fails is a
-sustained burst.
+Two different failures, and the counters separate them.
+
+**Straight onto the header, the signalling is clean.**
+`/proc/tty/driver/serial` shows `oe:2` and *zero* framing or parity errors, so
+the bytes arrive intact and the receiver drops them. Send the same 1900 bytes
+in 32-byte chunks 2 ms apart and it is 1900/1900 with the overrun count
+unchanged — the link is fine at 1500000 and what fails is a sustained burst.
 
 That is structural rather than a fault. `ttyS2` reports
 `base_baud = 1500000`: a 24 MHz `uartclk` and a divisor of exactly 1, the
@@ -680,16 +685,23 @@ because the header carries TX, RX and ground and nothing else. Anything longer
 than a keystroke — a pasted command, most obviously — is a burst. 115200 has
 thirteen times the slack and needs no flow control to survive one.
 
-The other thing worth ruling out is the adapter, and there is one data point
-worth having. An RS-232 transceiver in the path — the common USB-to-RS232 into
-an RS-232-to-TTL board rig — is specified to 235 kbps in the SP3232E/MAX3232
-family, so 1500000 is well outside its sheet. It has not been measured here,
-but the two rigs did behave differently at that rate: straight USB-to-TTL got
-1878 of 1900 bytes into the board, while the RS-232 chain could not get a
-single command into U-Boot. Both were 5 V, so the drive level is not what
-separates them; the RS-232 hop is the only difference left. Treat it as the
-first thing to swap out at 1500000, and note that none of it applies at
-115200, where every rig tried here has been flawless in both directions.
+**Through an RS-232 transceiver, it is the signalling.** 71 framing errors in
+one 3800-byte exchange, and both directions break — this is not the receiver
+falling behind, it is edges arriving in the wrong places. SP3232E and MAX3232
+parts are specified to 235 kbps, so 1500000 is six times outside the sheet and
+this is what that looks like. **At 115200 the same rig is flawless**, 1900 of
+1900 each way with no new framing errors, measured immediately afterwards as a
+control — so nothing is broken and the rate is the whole variable.
+
+One nuance, because it explains a confusing piece of history. That rig was
+run at **3.3 V** for these numbers. At **5 V** the same chain had been usable
+at 1500000 in the read direction — `docs/logs/rk612-boot-ok.log` was captured
+that way — and only the write direction failed. The transceiver's charge pump
+makes smaller, slower swings from a lower supply, so dropping it to 3.3 V
+pushes the read direction over as well. That is inference from the two
+measurements rather than a scope trace, but it fits both, and it explains why
+someone powering that board from a 3.3 V pin would conclude it "does not
+work": at the 1500000 that was then U-Boot's rate, it did not.
 
 This supersedes an earlier note in this tree that said the board "corrupts on
 write" at 1500000. It does not. The bytes arrive intact — no framing errors,

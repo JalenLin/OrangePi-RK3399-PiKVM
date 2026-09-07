@@ -345,8 +345,38 @@ being in spec here.
 logic level is whatever you fed its VCC. An SP3232E powered from header pin 2
 — 5 V, if the header follows the Raspberry Pi labelling the rest of it does —
 puts 0–5 V on its TTL output and into this pin, exactly like a 5 V USB-TTL
-board. The fix is one wire: the part runs from 3.0 to 5.5 V, so move its VCC
-to a 3.3 V pin. Meter the pin first rather than trusting the silkscreen.
+board.
+
+Powering the transceiver from a 3.3 V pin instead is the obvious fix, and it
+works — but only at a sane rate, which is why it did not look like it. Tried
+here on header pin 1 with an SP3232EEN: **115200 is flawless**, 1900 bytes
+each way with no framing errors. **1500000 is not** — 1676 and 524 of 1900,
+and 71 framing errors. At 5 V that same chain had been usable at 1500000 in
+the read direction, so lowering the supply pushes the transceiver, already six
+times outside its 235 kbps sheet, over in both directions.
+
+So a module that seems dead on 3.3 V is worth retrying at 115200 before
+concluding anything. Measurements are in [patches.md](patches.md), under
+uboot/0001.
+
+So for a transceiver, moving VCC is the whole fix: it removes the over-voltage
+at its source, needs no components, and costs nothing at 115200, which is the
+rate this image uses everywhere.
+
+**When the level is not yours to change** — a USB-to-TTL board wired for 5 V
+with no jumper, say — put a **1 kΩ resistor in series** on its TX where it
+meets this pin. It does not drop the level; it caps the clamp current at
+roughly 1.5 mA, well inside what the pad takes, and it is the standard way to
+feed a 3.3 V-class input from a 5 V source. At 115200 it is unnoticeable. A
+divider (2.2 kΩ series, 3.3 kΩ to ground, which lands on 3.0 V) is the
+alternative, at the cost of an RC that starts rounding edges by 1500000.
+Either way, leave the other direction alone: the board's 3.0 V TX into the
+adapter is not an over-voltage.
+
+One open question this makes moot rather than answers. Whether the board
+already has series resistors on these lines is not known here — the schematic
+is not in this tree — and either fix above settles it either way, for less
+effort than finding out.
 
 What this looks like in practice, and why it goes unnoticed for a long time:
 UART idle is logic high, so the pin sits at the adapter's high level
