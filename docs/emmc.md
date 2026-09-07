@@ -97,6 +97,55 @@ So the corollary to draw is the opposite of the comfortable one:
 Nothing in the three routes below does that: they all write the same BSP
 bootloader the card runs. It is worth knowing before you write your own.
 
+### Which combination boots what
+
+Two bootloader tracks and two media give four combinations, and they do not
+all do the obvious thing. What never varies is the first line above: **the
+loader always comes off the eMMC when the eMMC has one.** Only the choice of
+*operating system* is negotiable, and each bootloader makes it differently —
+the BSP U-Boot with `rkimgtest`, mainline with bootstd.
+
+| eMMC's loader | card | what boots | |
+|---|---|---|---|
+| BSP | BSP | the **card**, the BSP way | measured |
+| BSP | mainline | the **card**, still the BSP way | inferred |
+| mainline | BSP | the **eMMC** — the card is scanned and rejected | measured |
+| mainline | mainline | the **card** | inferred |
+| erased | either | the **card**, running the card's own loader | measured (mainline card) |
+
+The two inferred rows rest on facts that were checked rather than assumed:
+
+* A mainline-track card is *accepted* by the BSP U-Boot. `rkimgtest` looks for
+  the Rockchip IDB magic at sector 64, and both tracks' `idbloader.img` begin
+  with it (`3b 8c dc fc`). Having been chosen, `bootrkp` then reads
+  `boot.img` from partition 3 — which mainline images still write, precisely
+  so that one card can be flipped between bootloaders. So the card boots, but
+  through the BSP path, using none of mainline.
+* A BSP-track card is *rejected* by mainline. It carries no
+  `/boot/extlinux/extlinux.conf` and no partition marked bootable, so bootstd
+  finds nothing on it — and falls through to eMMC without complaint. Measured;
+  Linux still enumerates the card as a full `mmcblk1` afterwards.
+
+**The rule to remember is not "SD does not work under mainline".** It is: do
+not mix tracks across media. Each bootloader boots its own track's medium
+first, and the mismatched pairs either silently use the other medium or
+silently use the other bootloader.
+
+### Getting a card written when the board boots from it
+
+The obvious sequence is circular, and it costs an afternoon to discover: a
+card cannot be imaged while the board is running from it, and the board will
+not run from eMMC while a bootable card is in the slot.
+
+Zero **one sector** — the card's sector 64, where `rkimgtest` looks — and the
+BSP U-Boot skips the card without anything else on it being touched. The board
+boots eMMC with the card still in, and the card can then be written whole.
+Verified.
+
+The reverse, testing a card's own bootloader, needs the eMMC's loader region
+erased instead (sectors 64 through 40959), because the BootROM reaches a card
+only when the eMMC has nothing it can use.
+
 ## Building the image
 
 ```sh
