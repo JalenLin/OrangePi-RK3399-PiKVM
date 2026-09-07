@@ -187,8 +187,8 @@ cat <<'DONE'
 :: done.
 
    Power the board off, take the SD card out, and power it back on. The card
-   has to come out: this board's BootROM prefers it, so with a card in the
-   slot the eMMC is never reached.
+   has to come out: the BSP U-Boot prefers it whenever one is present, so with
+   a card in the slot the eMMC's root filesystem is never reached.
 
    To confirm afterwards, `cat /proc/cmdline` should say storagemedia=emmc.
 

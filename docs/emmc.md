@@ -39,19 +39,43 @@ stops an SD boot from mounting the eMMC's root filesystem, or the reverse.
 The GUIDs are the vendor's, not an invention here: `615e…54a9` is what the
 vendor's own `external/install_to_emmc` writes.
 
-## Boot order: the card always wins
+## Boot order: the eMMC's loader runs first and then hands over to the card
 
-Measured twice on this board, in both directions:
+The observable behaviour is simple — **to boot from eMMC, take the card
+out** — and it held every time it was tried:
 
 * Before any of this, the eMMC held a complete factory Android 8.1 image — a
   Rockchip loader at sector 64, a parameter block at sector 8192, no GPT. With
-  a PiKVM card in the slot the board booted the **card**, every time.
+  a PiKVM card in the slot the board booted the **card**.
 * After installing PiKVM to eMMC, with the card still in, it still booted the
   card. It booted eMMC on the first power-up with the slot empty.
 
-So: **to boot from eMMC, take the card out.** And the useful corollary — you
-cannot lock yourself out of this board through the eMMC. Whatever state you
-leave it in, a card in the slot takes priority, boots, and can rewrite it.
+The mechanism is not what that behaviour suggests, and the difference is the
+one thing in this document that can cost you a board.
+
+**The BootROM reads eMMC first.** It does not look at the card until the eMMC
+has no loader it can use. What makes the card win is one stage later: the BSP
+U-Boot scans for a boot device itself and prefers SD, which is exactly why it
+then reports `storagemedia=sd`. The card is chosen *by the bootloader that
+came off the eMMC*, not ahead of it.
+
+This was measured the expensive way. Testing mainline U-Boot meant writing its
+TPL/SPL to the eMMC, and mainline's SPL takes its boot order from
+`u-boot,spl-boot-order = "same-as-spl", &sdhci, &sdmmc` — it stays on the
+device the ROM loaded it from. With that on the eMMC and a perfectly good
+PiKVM card in the slot, the board ran the eMMC's TPL, stalled, and never
+looked at the card. Serial confirmed it: `U-Boot TPL 2025.07` with the card
+in.
+
+So the corollary to draw is the opposite of the comfortable one:
+
+> **A card is a recovery path only while the eMMC carries a loader that hands
+> over to it.** Replace the eMMC's bootloader with one that does not, and the
+> board boots nothing at all — card or no card — and only maskrom gets it
+> back.
+
+Nothing in the three routes below does that: they all write the same BSP
+bootloader the card runs. It is worth knowing before you write your own.
 
 ## Building the image
 
@@ -130,12 +154,13 @@ vendor blob repo (`sources/external-bsp/rkbin/tools/rkdeveloptool`, which
 `make uboot` fetches) and the loader is `rk3399_loader_v1.22.119.bin`, which
 `make uboot` packs and copies to `output/uboot/`. Nothing to install.
 
-**This route is not verified here**, and the honest reason is that getting
-this board into maskrom is a physical action — no vendor source in this tree
-documents which button or pad does it, and it is not something the board can
-be talked into over SSH. What is certain is the other direction: a board with
-an empty slot and no valid loader on eMMC falls into maskrom on its own, so
-this is the route back from an interrupted write.
+Getting the board into maskrom is a physical action: the vendor's own
+instructions, in `board/rockchip/evb_rk3399/README` in the BSP U-Boot tree,
+are *"power on (or reset with RESET KEY) with MASKROM KEY pressed"*.
+
+This is the route back from a bootloader that does not boot — see the boot
+order above — so it is worth knowing where that key is on your board before
+you need it, rather than after.
 
 Routes 1 and 2 need none of this, which is why they are listed first.
 
@@ -181,7 +206,10 @@ plain file, so treat installing over it as one-way.
 
 ## Going back to a card
 
-Put one in and power on. Nothing else: the boot order does the rest, and the
-eMMC install sits there untouched until the card comes out again. Two PiKVM
-installations on one board do not collide, which is the whole point of the
-GUID split.
+Put one in and power on. The eMMC's BSP U-Boot picks the card up and hands
+over to it, and the eMMC install sits there untouched until the card comes out
+again. Two PiKVM installations on one board do not collide, which is the whole
+point of the GUID split.
+
+This works because the eMMC is running the same BSP U-Boot the card is. It is
+not a property of the board.

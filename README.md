@@ -40,8 +40,9 @@ The board also has 14.6 GB of eMMC, and `make emmc-image` builds the same
 image laid out for it — three minutes on top of a build you already have. It
 has to be a separate image: the vendor U-Boot decides `root=` from the medium
 it booted off and hardcodes a different partition GUID for each.
-[docs/emmc.md](docs/emmc.md) has that, the boot order (the card always wins),
-and three ways to write it.
+[docs/emmc.md](docs/emmc.md) has that, three ways to write it, and the boot
+order — which is not what it looks like, and is the one thing there that can
+cost you a board.
 
 Everything builds in containers; nothing installs on your machine except one
 qemu binfmt handler. Individual steps (`make uboot`, `kernel`, `rootfs`,
