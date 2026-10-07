@@ -104,7 +104,9 @@ what pixel clocks under roughly 70 MHz need.
 
 Patch 0012 computes it from the mode instead. Verified at 1024x768p60:
 FIFOCTL programs to 337, and 30 frames capture with zero zero-filled bytes,
-against 24% before. See docs/known-issues.md for what is still unverified.
+against 24% before. 800x600p60, 640x480p60 and 720x400p70 are clean too, and
+800x600 streams through the VPU without a copy - its 600 lines are not a
+whole number of macroblock rows, which is the case kernel 0014 is for.
 
 ## The colour path is unity
 

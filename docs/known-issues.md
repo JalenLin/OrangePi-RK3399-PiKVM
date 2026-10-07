@@ -153,15 +153,6 @@ interrupt input.
 **Not proven** — the original event was never reproduced — but it is the only
 mechanism found that fits.
 
-## Modes not yet verified
-
-Patch 0012 sizes the bridge's CSI FIFO from the mode, replacing a vendor table
-that covered 1080p60 and 720p60 and left everything else on a flat 300. That
-is verified at 1024x768p60 (FIFOCTL 337, zero zero-filled bytes over 30
-frames, against 24% before). **800x600p60 and 720x400p70 are unverified** —
-the formula says the old table under-served them too, so they should have been
-broken before and clean now, but nobody has looked.
-
 ## Two media carrying the same image collide
 
 Write an SD-family image to the eMMC, leave an SD-family card in the slot, and

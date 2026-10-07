@@ -714,7 +714,8 @@ Checked and rejected:
 
 ## Done
 
-* **Capture** - 1080p60. See docs/capture.md.
+* **Capture** - 1080p60, and the low modes patch 0012 is for: 1024x768p60,
+  800x600p60, 640x480p60, 720x400p70. See docs/capture.md.
 * **`kvmd-otg`** - Patch 0001 puts the Type-C dwc3 into peripheral mode
   so a UDC exists at all, and 0008 gives the CD-ROM LUN its own inquiry
   string. `/dev/hidg0..2` are present on every boot since, and keyboard,
@@ -758,8 +759,6 @@ Checked and rejected:
 * **ATX** - pins chosen, hardware not built. Ships disabled; see
   docs/hardware.md for what to build and docs/known-issues.md for why it is
   off.
-* **Capture modes other than 1080p60** - see "Modes not yet verified" in
-  docs/known-issues.md.
 
 ## Wi-Fi, in detail
 

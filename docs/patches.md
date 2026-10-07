@@ -569,7 +569,12 @@ high, which is the direction to err in.
 The computed value is a **floor** under the vendor table, never a replacement:
 the tuned levels are known good and there is nothing to gain by lowering
 1080p60 from 370 to 194. Verified on hardware — 1024x768p60 now programs
-FIFOCTL to 337 and captures with zero zero-filled bytes.
+FIFOCTL to 337 and captures with zero zero-filled bytes. So do 800x600p60,
+the mode the table predicted would fail, 640x480p60 and 720x400p70: 30
+frames each, a test pattern with no black in it so that any zero byte is a
+fill, and the picture checked for shear. The source was the board's own HDMI
+OUT looped into its HDMI IN; 720x400p70 is not in the connector's mode list
+and was set as a custom 28.322 MHz mode.
 
 ### The trap in it
 
