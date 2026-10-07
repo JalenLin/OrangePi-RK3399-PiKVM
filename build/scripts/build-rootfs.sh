@@ -33,6 +33,7 @@ cp -a "${ROOT}/overlay" "${CTX}/overlay"
 rm -rf "${CTX}/patches"
 mkdir -p "${CTX}/patches"
 cp -a "${ROOT}/patches/libv4l-rkmpp" "${CTX}/patches/"
+cp -a "${ROOT}/patches/v4l-utils" "${CTX}/patches/"
 
 msg "building rootfs image (pacman under qemu; slow)"
 docker build \

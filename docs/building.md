@@ -207,9 +207,10 @@ git diff -- path/to/file > ../../patches/kernel-6.12/00NN-what-it-does.patch
 Add a prose header above the diff. `git apply` ignores anything before the
 first `---`/`diff` line, and docs/patches.md explains what each patch is for.
 
-**Userspace patches.** `patches/libv4l-rkmpp/` is applied inside the rootfs
-build. Changing one invalidates the Docker layer cache from that point on, so
-expect the `/opt/rkmpp` stage to rebuild (~20 min), not the whole rootfs.
+**Userspace patches.** `patches/libv4l-rkmpp/` and `patches/v4l-utils/` are
+applied inside the rootfs build. Changing one invalidates the Docker layer
+cache from that point on, so expect the `/opt/rkmpp` stage to rebuild (~20
+min), not the whole rootfs.
 
 **The overlay.** `overlay/` is copied over the rootfs verbatim, preserving
 paths. This is where every board-specific config lives — kvmd's `main.yaml`,

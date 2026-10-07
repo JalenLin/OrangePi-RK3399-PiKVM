@@ -1,0 +1,54 @@
+libv4l2: publish devices_used under the open mutex
+
+v4l2_fd_open() claims a free slot in devices[] under v4l2_open_mutex, but
+grows devices_used - the bound v4l2_get_index() searches up to - only
+later, after the unlock. Two opens running at once race on it: if the one
+that got the higher index writes first and the one with the lower index
+writes last, devices_used shrinks and the higher slot falls outside the
+search.
+
+That device still looks open. Its QUERYCAP succeeded, since that ran
+through the plugin inside v4l2_fd_open() itself. But every later ioctl on
+the fd is looked up, not found, and passed to the kernel on the plugin's
+dummy file instead - so the first control the application sets fails with
+EINVAL and nothing in the plugin ever sees it.
+
+ustreamer opens its H.264 encoder and its JPEG encoders from separate
+threads at the same moment, through two libv4l-rkmpp instances. About one
+start in twenty lost one of them this way: "Can't set option
+V4L2_CID_MPEG_VIDEO_BITRATE: Invalid argument", then "Encoder destroyed due
+an error (prepare)", and no WebRTC (or one JPEG worker) until the streamer
+next restarted.
+
+Grow devices_used inside the critical section that claims the slot, so it
+can only increase.
+
+--- a/lib/libv4l2/libv4l2.c
++++ b/lib/libv4l2/libv4l2.c
+@@ -732,6 +732,16 @@
+ 			devices[index].plugin_library = plugin_library;
+ 			devices[index].dev_ops_priv = dev_ops_priv;
+ 			devices[index].dev_ops = dev_ops;
++			/*
++			 * Publish the slot under the same lock that claimed
++			 * it. Updated after the unlock, two concurrent opens
++			 * race on devices_used: the one holding the lower
++			 * index can write it last and shrink it, and the
++			 * other device drops out of v4l2_get_index() - its
++			 * ioctls then bypass the plugin entirely.
++			 */
++			if (index >= devices_used)
++				devices_used = index + 1;
+ 			break;
+ 		}
+ 	}
+@@ -779,9 +789,6 @@
+ 	devices[index].readbuf = NULL;
+ 	devices[index].readbuf_size = 0;
+ 
+-	if (index >= devices_used)
+-		devices_used = index + 1;
+-
+ 	/* Note we always tell v4lconvert to optimize src fmt selection for
+ 	   our default fps, the only exception is the app explicitly selecting
+ 	   a frame rate using the S_PARM ioctl after a S_FMT */

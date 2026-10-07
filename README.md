@@ -80,6 +80,7 @@ build/scripts/                 one script per build stage
 overlay/                       files grafted into the rootfs (kvmd config, udev, systemd)
 patches/kernel-6.12/           kernel patches, applied in filename order
 patches/libv4l-rkmpp/          userspace patches, applied inside the rootfs build
+patches/v4l-utils/             a libv4l2 fix, applied the same way
 docs/logs/                     a known-good boot log to diff against
 sources/                       upstream checkouts - cloned by the build, gitignored
 output/                        build products (gitignored)

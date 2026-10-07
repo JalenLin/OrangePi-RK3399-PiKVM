@@ -971,6 +971,42 @@ The wrapper switched to `--encoder=m2m-video` to get this. Without 0014 (or
 on any capture buffer that is too small), the plugin copies and the stream
 behaves exactly as `m2m-image` did.
 
+## v4l-utils/0001 — libv4l2: publish `devices_used` under the open mutex
+
+About one streamer start in twenty lost an encoder:
+
+```
+H264: Can't set option V4L2_CID_MPEG_VIDEO_BITRATE: Invalid argument
+H264: Encoder destroyed due an error (prepare)
+```
+
+sometimes for `JPEG-1` instead of `H264`. No WebRTC, or one JPEG worker
+short, until kvmd next restarted the streamer. Seen first on a freshly
+flashed card's first boot; reproduced standalone, starting ustreamer with a
+JPEG client and an H.264 reader attached at once: 5 failures in 130 runs.
+
+It was not the plugin. With the plugin logging every ioctl, the failing
+instance's `QUERYCAP` reached its context and its `S_CTRL` never did - the
+EINVAL came from somewhere between ustreamer and the plugin. That is
+libv4l2's device table. `v4l2_fd_open()` claims a free slot in `devices[]`
+under `v4l2_open_mutex`, then grows `devices_used`, the bound
+`v4l2_get_index()` searches up to, *after* unlocking. ustreamer opens its
+H.264 encoder and its JPEG encoders from separate threads at the same
+moment, and the two opens race on it: if the one holding the lower index
+writes last, `devices_used` shrinks and the other slot falls outside the
+search. Its `QUERYCAP` had already succeeded inside `v4l2_fd_open()`; every
+later ioctl was looked up, not found, and sent to the kernel on the plugin's
+dummy file.
+
+The patch grows `devices_used` inside the critical section that claims the
+slot, so it can only increase. Upstream has the same code; this is not a
+Rockchip-specific bug, only one that needs two devices opened at once to
+show.
+
+Verified: the same standalone test, the three encoders initialising within
+the same 20 ms, ran 100 times without a failure. At the old rate a clean 100
+would happen by chance about one time in fifty.
+
 ## Deliberate compromises
 
 **cpufreq is a module, loaded after the rootfs is up.** It used to be off
