@@ -1,8 +1,9 @@
 # First boot checklist
 
-Run these in order on the real board. Each step tells you which of the
-project's unverified assumptions was wrong, and most of them can be fixed
-without rebuilding the whole image.
+Run these in order on a freshly flashed board. Every step has passed on the
+shipped image, and the output each one shows is what this board printed. Use
+the list to find where yours stops: each step only makes sense once the one
+before it passes.
 
 Serial console: **115200 8N1** on the debug UART, for the whole boot. RK3399
 boards conventionally use 1500000 and the vendor U-Boot defaults to it, but
@@ -28,6 +29,10 @@ picocom -b 115200 /dev/ttyUSB0
 U-Boot waits two seconds for Ctrl+C, so you can stop at a prompt when the
 kernel is the thing that is broken.
 
+The kernel log has a few dozen lines that look like failures and are not -
+missing optional IRQs, a critical-clock WARNING with a backtrace. They are
+listed in docs/known-issues.md; check there before chasing one.
+
 ## 1. Does it boot at all?
 
 If U-Boot prints but the kernel never starts, the boot partition is the
@@ -36,131 +41,162 @@ If the kernel starts but panics on mounting root, the partition GUID is wrong;
 check `sfdisk --dump /dev/mmcblk1` reports
 `614e0000-0000-4b53-8000-1d28000054a9` on partition 4 — or `615e…54a9` on
 `/dev/mmcblk0` if you are booting the eMMC, where the prefix differs on
-purpose (see [emmc.md](emmc.md)).
-
-## 2. Is the bridge chip actually at 0x0f?
-
-The two vendor device trees disagree (`0x0f` vs `0x1f`), so settle it:
+purpose (see [emmc.md](emmc.md)). If it drops into emergency mode instead,
+the usual cause is a second card or the eMMC carrying the same image - see
+"Two media carrying the same image collide" in known-issues.md.
 
 ```sh
-i2cdetect -y 1
+uname -r                       # 6.12.69-...
+cat /proc/device-tree/model    # Orange Pi RK3399 Board
 ```
 
-If the chip answers at an address the DTS does not name, nothing else in the
-capture chain will come up. Fix the `reg` in the DTS and rebuild the kernel.
+## 2. Is the HDMI IN bridge there?
 
-## 3. Did the driver bind?
+The TC358749 sits on i2c1 at `0x1f`. Once its driver has bound, `i2cdetect`
+shows it as `UU`, not as an address:
 
 ```sh
-dmesg | grep -iE 'tc3587|rkisp|mipi'
+i2cdetect -y 1                 # UU at 1a (the audio codec) and at 1f
+journalctl -k -b -o cat | grep -E 'tc35874x|rkisp1 '
 ```
 
-Expect the tc35874x probe to succeed and rkisp1 to register. A probe that
-fails on clocks or regulators points at the GPIO/rail table in
-`hardware.md` — the 4.4.179 DTS leaves rails to the regulator framework, and
-this board may need them driven explicitly the way 4.4.103 did.
+Expect, among others:
 
-## 4. What is the video node called?
-
-```sh
-v4l2-ctl --list-devices
-ls -l /dev/kvmd-video          # created by our udev rule
+```
+tc35874x 1-001f: driver version: 00.01.01
+m00_b_tc35874x 1-001f: tc358749 found @ 0x3e (rk3x-i2c)
+rkisp1 ff910000.rkisp1: rkisp1 driver version: v00.01.05
 ```
 
-`/dev/kvmd-video` missing but a node present means the udev rule's
-`ATTR{name}` guess is wrong. Read the real name:
+`0x1f` with nothing bound means the driver failed probe on a clock or a rail,
+and the GPIO and rail table in hardware.md is where to look. Nothing at
+`0x1f` at all means the chip is held in reset or unpowered.
+
+`rkisp1: Missing rockchip,grf property` and, every time a stream starts,
+`can not get first iq setting in stream on`, are the vendor ISP looking for
+sensor tuning this YUV path does not use. Harmless.
+
+## 3. What is the video node called?
 
 ```sh
-cat /sys/class/video4linux/video0/name
+ls -l /dev/kvmd-video /dev/kvmd-video-bridge
+cat /sys/class/video4linux/video0/name     # rkisp1_mainpath
 ```
 
-and correct `overlay/usr/lib/udev/rules.d/99-kvmd.rules`. This one is fixable
-in place on the running board — no rebuild needed to test.
+`/dev/kvmd-video` is the ISP's main path, not the receiver; the receiver is
+the subdev behind `/dev/kvmd-video-bridge`. docs/capture.md explains why that
+matters. A node present without the symlink means the name in
+`overlay/usr/lib/udev/rules.d/99-kvmd.rules` no longer matches - fixable in
+place, then `udevadm trigger`.
 
-## 5. Does it see a source?
+## 4. Does it see a source?
 
-Plug a live HDMI source in, then:
+`kvmd-tc358743.service` loads the EDID into the receiver at boot. Without it
+a source sees nothing to drive and the receiver reports no signal.
 
 ```sh
+systemctl is-active kvmd-tc358743
 v4l2-ctl -d /dev/kvmd-video --query-dv-timings
-v4l2-ctl -d /dev/kvmd-video --set-edid=file=/etc/kvmd/tc358743-edid.hex --fix-edid-checksums
+```
+
+With a 1080p60 source plugged in, the timings report `Active width: 1920`,
+`Active height: 1080`, `Total width: 2200`, `Total height: 1125`. No timings
+with the service active usually means the source has not re-read the EDID;
+unplug and replug it. To load the EDID by hand:
+
+```sh
+v4l2-ctl -d /dev/kvmd-video-bridge --set-edid=pad=0,file=/etc/kvmd/tc358743-edid.hex
+```
+
+## 5. Capture a frame
+
+kvmd holds the capture node while anyone is watching, so stop it first:
+
+```sh
+systemctl stop kvmd
 v4l2-ctl -d /dev/kvmd-video --set-dv-bt-timings query
+v4l2-ctl -d /dev/kvmd-video --set-fmt-video=width=1920,height=1080,pixelformat=YUYV \
+    --stream-mmap --stream-count=60 --stream-to=/tmp/f.raw
+ls -l /tmp/f.raw               # 248832000 bytes: 60 frames of 1920x1080x2
+systemctl start kvmd
 ```
 
-No timings usually means EDID was never presented to the source, or hot-plug
-detect is not wired — both are bridge-side, not capture-side.
+`v4l2-ctl` prints the rate as it goes; it should settle at 60 fps. The format
+is YUYV, not the UYVY a Pi uses: the main path has no UYVY at all, see
+capture.md.
 
-## 6. Capture a frame
+## 6. USB gadget
 
 ```sh
-v4l2-ctl -d /dev/kvmd-video --set-fmt-video=pixelformat=UYVY --stream-mmap --stream-count=1 --stream-to=/tmp/f.raw
-ls -l /tmp/f.raw
+systemctl is-active kvmd-otg
+ls /sys/class/udc              # fe800000.usb
+ls /dev/hidg*                  # hidg0 hidg1 hidg2
 ```
 
-This is the moment of truth for the rkisp1 YUV422 question in
-`roadmap.md`. If 1080p60 fails but 1080p30 works, you have hit the MIPI FIFO
-bandwidth limit; note which and record it.
+Keyboard, absolute mouse, relative mouse, plus a mass-storage function for
+the virtual CD/flash drive. No UDC at all means the Type-C controller is not
+in peripheral mode: patch 0001 sets `dr_mode = "peripheral"` on
+`usbdrd_dwc3_0`, and `cat /proc/device-tree/usb@fe800000/usb@fe800000/dr_mode`
+shows what the running device tree says. Then plug the Type-C port into the
+target and check that it sees a keyboard and a mouse.
 
-## 7. HID gadget
+## 7. The web UI, and the encoder behind it
 
 ```sh
-ls /dev/hidg*                  # expect hidg0, hidg1
-systemctl status kvmd-otg
+systemctl is-active kvmd kvmd-nginx kvmd-janus kvmd-media
 ```
 
-Nothing there means the OTG port is not in peripheral mode. Check
-`dr_mode` on `usbdrd_dwc3_0` and whether the Type-C port is being held in host
-mode by the extcon/typec driver.
-
-## 8. The web UI
+Browse to `https://<board-ip>/`. The MJPEG stream and WebRTC (H.264) should
+both work. ustreamer only runs while someone is watching, so check the
+encoder with the page open:
 
 ```sh
-systemctl status kvmd kvmd-nginx
-journalctl -u kvmd -b --no-pager | tail -50
+cat /proc/mpp_service/sessions-summary
+grep ff650000.vepu /proc/interrupts        # count rises while streaming
+top -b -c -n2 -d2 | grep kvmd/streamer | tail -1
 ```
 
-Then browse to `https://<board-ip>/`. Expect MJPEG to work and WebRTC not to —
-that is a known gap, not a bug. Watch CPU while streaming: software MJPEG is
-the cost of the BSP track, and how expensive it really is decides how much the
-mainline track is worth.
+Expect VEPU2 sessions with `format` `mjpeg` (two, one per JPEG worker), plus
+an `h264` one once something reads the H.264 sink, and the streamer at
+10-40% of one core at 1080p, depending on how well the picture compresses. The command line should show `--encoder=m2m-video`. If it
+says `--encoder=cpu`, the wrapper in `/usr/lib/pikvm/ustreamer-encoder` did
+not find the hardware path and fell back to software JPEG, which costs about
+three cores; the wrapper's tests say what it looks for.
+
+## 8. HDMI output
+
+```sh
+cat /sys/class/drm/card0-HDMI-A-1/status   # connected, with a monitor
+```
+
+The board's own HDMI OUT carries the text console at the monitor's preferred
+mode (1080p60 on a 1080p screen). Hot-plug works either way round. Nothing
+on a KVM needs this, but it is the quickest way to a login prompt without the
+UART.
 
 ---
 
-## 9. Optional: the hardware H.264 experiment (rkmpp variant only)
+## 9. Optional: VPU diagnostic
 
-Only on a card flashed from `orangepi-rk3399-pikvm-rk612-rkmpp.img`, and only
-on a kernel carrying patch 0001 - before that the codec nodes were disabled in
-the device tree and step 1 could not do anything but fail. Do this *after*
-steps 1-8 pass on the `base` card, so that a failure here is unambiguous.
+If step 7 fell back to software, this narrows down where:
 
 ```sh
 /opt/rkmpp/try-h264.sh
 ```
 
-The script's four steps answer different questions, and they are not equally
-important:
-
 **Step 1 is the one that matters.** `mpi_enc_test` talks to Rockchip's MPP
-directly and asks whether this board's H.264 encoder works at all. Its answer
-holds regardless of everything above it:
+directly and asks whether the encoder works at all, independently of the
+plugin, libv4l and ustreamer:
 
-* passes → the silicon and the kernel MPP service are fine, so hardware H.264
-  is reachable; it is only a question of how userspace gets at it
+* passes → the silicon and the kernel MPP service are fine; the problem is in
+  userspace, and the remaining steps narrow it down
 * fails → the problem is the kernel side (`/dev/mpp_service`), and no amount
   of userspace shimming will help. First check the DTB rather than the config:
   `fdtget -t s <dtb> /mpp-srv status` must say `okay`. A `=y` config symbol
   only means the driver was built, not that a node exists for it to bind to -
-  that distinction is what hid this for two images.
+  that distinction hid this for two images.
 
-**Step 4 replays ustreamer's own encoder ioctl sequence** against the shim, so
-it does not need a working capture chain to be meaningful. It has been run:
-the data path works and the control path does not - every `VIDIOC_S_CTRL`
-returns `ENOTTY`, which is the first thing ustreamer does and the thing it
-aborts on. Rerun it if you change the plugin; the interesting line is the
-`-- controls --` block.
-
-Record which step failed and how - that is what picks between routes A, A' and
-B in `roadmap.md`.
-
-Nothing here runs at boot or is referenced by any service. To remove the whole
-experiment from a running system: `rm -rf /opt/rkmpp`.
+Step 4 replays ustreamer's own encoder ioctl sequence against the plugin, so
+it does not need a working capture chain. On the shipped image every step
+passes. It runs alongside kvmd without disturbing it; the VPU takes several
+sessions at once.

@@ -9,10 +9,11 @@
 # something to do to a daemon that only spawns the encoder. Hence a wrapper
 # that execs, so the process kvmd is watching is still ustreamer itself.
 #
-# The fallback is not decoration. main.yaml is shared by both image variants
-# and only the "rkmpp" one ships /opt/rkmpp, so on a base image every test
-# below fails and this runs the software encoder exactly as before. Losing
-# hardware encoding costs three cores; getting no video at all costs the KVM.
+# The fallback is not decoration. Every image ships /opt/rkmpp now, but a
+# kernel without the VPU node, a missing device file or a plugin that fails
+# to load would otherwise leave kvmd with no video at all. With it, every test
+# below fails and this runs the software encoder instead. Losing hardware
+# encoding costs three cores; getting no video at all costs the KVM.
 set -e
 
 PREFIX=/opt/rkmpp

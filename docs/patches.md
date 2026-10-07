@@ -950,6 +950,12 @@ Measured at 1080p60:
 | JPEG delivered | 30 fps | ~45 fps |
 | ustreamer with H.264 sink encoding (JPEG zero-copy in both) | 55% | 4% |
 
+Those were taken against a Raspberry Pi's Kodi home screen. What is left
+scales with the size of the encoded frame, so a picture that compresses badly
+costs more: the board's own text console, looped back into HDMI IN, encodes
+to ~300 KB a frame at q80, and streaming it continuously costs 38% at 46 fps
+(25% at q30). Still a fraction of the copy it replaced.
+
 The JPEG output is byte-identical to `m2m-image` at q30, q50, q80 and q95 -
 each checked between two `m2m-image` runs, so a changing screen cannot pass
 for a match - which also means `--drop-same-frames` keeps working: a static

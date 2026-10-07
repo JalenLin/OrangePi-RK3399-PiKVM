@@ -1,8 +1,10 @@
 # Roadmap
 
-Two tracks, run in that order. The point of the split is that track 1 proves
-the hardware and gives a usable device, so track 2 can be judged against
-something that actually works rather than against a guess.
+Three kernel tracks were planned, and one ships. Track 1 (the vendor's 4.4)
+died before its first boot. Track 1.5 (Rockchip's own 6.12) is what every
+image runs. Track 2 (mainline) is not being pursued; its section says why,
+and keeps the plan for whoever picks it up. Mainline *U-Boot* is a separate
+matter: it works, and is an optional build, see further down.
 
 ## Track 1 — BSP 4.4 (abandoned)
 
@@ -48,13 +50,13 @@ minute. Track 1.5 is now the real first track.
 `kvmd` hard-depends on `raspberrypi-io-access`, `raspberrypi-utils` and
 `janus-gateway-pikvm`, so an Arch install drags them onto a board that is not
 a Pi. Nothing breaks - the ATX backend uses libgpiod, and janus is now
-started deliberately rather than by accident - but expect
-`vcgencmd`-flavoured noise in the logs, and remember that upstream's
+started deliberately rather than by accident - and kvmd's `vcgencmd` polling
+is answered by a stub (docs/known-issues.md). Remember that upstream's
 packaging assumes a Pi even when its code does not. The ATX defaults are the
 sharp end of that assumption: they are BCM pin numbers, and they mean
 something entirely different here. See docs/hardware.md.
 
-## Track 1.5 — Rockchip's own 6.12 BSP (current)
+## Track 1.5 — Rockchip's own 6.12 BSP (what ships)
 
 Now the default (`KERNEL_TRACK=rk612`). Rockchip
 maintains `rockchip-linux/kernel` out to **`develop-6.12`**, and that branch
@@ -73,13 +75,14 @@ What is already there:
 * The Rockchip `%.img` / `boot.img` / `resource.img` make targets survive, so
   our image assembly needs no changes at all.
 
-What is missing:
+What was missing, and is now ours:
 
 * **That 6.12 DTS does not wire up HDMI IN.** Its 895 lines contain no
-  `tc3587`, `hdmiin`, `rkisp` or `mipi_dphy` node. The nodes have to be
-  written - but the 4.4.179 versions transfer nearly verbatim, and the GPIO
-  and rail table is already recorded in `hardware.md`.
-* No `rk3399_linux_defconfig`; 6.12 uses a unified `rockchip_linux_defconfig`.
+  `tc3587`, `hdmiin`, `rkisp` or `mipi_dphy` node. Patch 0001 adds them,
+  carried over from the 4.4.179 tree nearly verbatim, along with the rest of
+  this board's configuration.
+* No `rk3399_linux_defconfig`; 6.12 uses a unified `rockchip_linux_defconfig`,
+  with `config/kernel-fragments/pikvm.config` merged over it.
 
 Why this matters: it sits exactly where the project wants to be. A 6.12 kernel
 answers CLAUDE.md's preference for current code far better than 4.4.179 does,
@@ -87,10 +90,18 @@ while keeping a vendor-maintained TC358749 driver and a vendor-maintained ISP -
 so it dodges track 2's real risk, which was never the bridge driver but making
 mainline `rkisp1` carry YUV422 at 1080p60.
 
-Unknowns worth an afternoon before committing to it: how well Rockchip
-actually tests RK3399 on a branch aimed at RK3588; whether the vendor ISP or
-`rkisp1` is the one to bind; and whether our BSP U-Boot boots a 6.12 image
-unchanged.
+The unknowns it started with, answered:
+
+* **How well Rockchip tests RK3399 on a branch aimed at RK3588** - not much.
+  Patches 0003-0012 are bugs anyone on this SoC would hit, from a regulator
+  that never probes to an ISP that loses its IOMMU mapping after a reset.
+  "Why this branch, and what it costs" at the end of this file has the rest.
+* **Vendor ISP or `rkisp1`** - the vendor `isp1/` driver
+  (`rockchip,rk3399-rkisp1`), the one the working 4.4 HDMI IN tree bound to.
+  It carries YUV422 at 1080p60.
+* **Whether the BSP U-Boot boots it unchanged** - nearly: patch 0002 renames
+  the MMC nodes the vendor U-Boot looks up by name, and 0001 keeps the
+  `vdd_log` properties U-Boot reads out of the kernel's device tree.
 
 ### Build status
 
@@ -109,12 +120,23 @@ knowing if you touch this:
   boot partition. Grown to 128 MiB into the unused gap the vendor layout
   already leaves before rootfs; rootfs start is unchanged.
 
-Still to do: the HDMI IN device tree nodes, which 6.12's board DTS does not
-have. If this works, it replaces track 2 rather than preceding it.
+It worked, and it replaced track 2 rather than preceding it.
 
-## Track 2 — mainline
+## Track 2 — mainline (not pursued)
 
 Linux 6.x, per the project's stated preference for current code.
+
+**Decided against, 2026-10.** Track 1.5 already does everything this track
+would, and this one would take two things away:
+
+* **The TC358749 driver.** `tc35874x.c` exists only in Rockchip's tree;
+  mainline would need item 1 below before there is any video at all.
+* **H.264, and so WebRTC.** Mainline drives the VPU with `hantro`, which on
+  RK3399 has a JPEG encoder and nothing else - see "What mainline buys us".
+
+What it would buy is a kernel with nothing of Rockchip's in it, at the cost
+of items 1 and 3 below and of H.264 until someone writes a VEPU2 encoder for
+`hantro`. The plan is kept as it was written, for whoever picks it up.
 
 Three pieces of work, in dependency order:
 
@@ -180,8 +202,12 @@ unchanged: TC358749 support and `rkisp1` at 1080p60 YUV422, below.
 
 ### H.264, and therefore WebRTC
 
-Neither track streams WebRTC as built, but this is a kernel-driver question
-only - and a more tractable one than it first looks.
+*Solved; "Where this ended up" below is the outcome. The rest of this section
+is the investigation as it went, kept because the dead ends are worth
+knowing.*
+
+Neither track streamed WebRTC as first built, but this is a kernel-driver
+question only - and a more tractable one than it first looks.
 
 **ustreamer does not need changing.** Its H.264 encoder is generic V4L2 M2M:
 the binary drives `V4L2_CID_MPEG_VIDEO_H264_PROFILE`, `_LEVEL`, `_MAX_QP` and
@@ -333,8 +359,10 @@ against 4 ms out of ordinary memory. `patches/libv4l-rkmpp/0003` imports the
 dma-buf so VEPU2 reads it in place, kernel 0014 sizes capture buffers for the
 1088 lines VEPU2 actually fetches (an exact-size buffer faulted its IOMMU),
 and the plugin reads `--quality` back out of the bitrate `m2m-video` turns it
-into. As kvmd runs it at 1080p60: 86% to 9%, JPEG 30 fps to ~45, output
-byte-identical. The H.264 sink's own copy went with it, 55% to 4%.
+into. As kvmd runs it at 1080p60, on Kodi's home screen: 86% to 9%, JPEG
+30 fps to ~45, output byte-identical. The H.264 sink's own copy went with it,
+55% to 4%. What remains scales with the encoded frame size; a text console
+that encodes to 300 KB a frame costs 38% streaming continuously.
 
 **H.264 followed, through the same door**, and it is verified on hardware -
 `ffprobe` on the live sink reports Constrained Baseline, level 40, 1920x1080,
@@ -684,20 +712,30 @@ Checked and rejected:
 * **mainline v6.12** has the same board DTS again, byte for byte, but no
   TC358749 driver - the one thing that cannot be replaced.
 
-## Still open
+## Done
 
-* **Capture** - working at 1080p60. See docs/capture.md.
-* **`kvmd-otg`** - done. Patch 0001 puts the Type-C dwc3 into peripheral mode
+* **Capture** - 1080p60. See docs/capture.md.
+* **`kvmd-otg`** - Patch 0001 puts the Type-C dwc3 into peripheral mode
   so a UDC exists at all, and 0008 gives the CD-ROM LUN its own inquiry
   string. `/dev/hidg0..2` are present on every boot since, and keyboard,
   mouse and the mass-storage device are all verified against a real target.
-* **HDMI output** - works. The console comes up on it at 1080p60; verified
-  by looping the board's HDMI OUT into its own HDMI IN and capturing it.
-  Hot-plug works both ways.
-* **H.264 and WebRTC** - done. Patch 0001 enables VEPU2 and
+* **Hardware MJPEG** - on VEPU2, reading the capture buffer in place. See
+  "Where this ended up" above.
+* **H.264 and WebRTC** - Patch 0001 enables VEPU2 and
   `patches/libv4l-rkmpp/0002` gets ustreamer onto it, so `--h264-sink` is in
-  `main.yaml` and `kvmd-media`/`kvmd-janus` are enabled on the rkmpp variant.
-  Both verified on hardware.
+  `main.yaml` and `kvmd-media`/`kvmd-janus` are enabled. Both verified on
+  hardware.
+* **HDMI output** - the console comes up on it at 1080p60; verified by
+  looping the board's HDMI OUT into its own HDMI IN and capturing it.
+  Hot-plug works both ways.
+* **`vcgencmd` noise** - kvmd polled a Raspberry Pi throttling interface
+  every five seconds and logged a failure each time. A stub now answers it;
+  docs/known-issues.md says what its answer does and does not mean.
+* **Wi-Fi** - works, and is off until someone gives it credentials, because
+  those are not ours to ship. Details below.
+
+## Still open
+
 * **HDMI IN audio - parked, and it needs a scope, not more code.** The sink
   H.264 needed is there, kvmd's janus config already names `hw:tc358743,0`,
   and patch 0001 now makes that card exist. It captures silence. The
@@ -706,8 +744,9 @@ Checked and rejected:
   only runs when I2S2 has a clock and has none. Everything on the SoC side of
   the codec was proved good by measurement. All three implementation routes
   that were on the table are accounted for in docs/known-issues.md; none of
-  them changes this, because the missing thing is upstream of all of them. Next step is physical: a scope on the ALC5651's pins 28 and 29 while
-  the target plays audio. Patch 0013, the rail-voltage fix this turned up, is
+  them changes this, because the missing thing is upstream of all of them.
+  Next step is physical: a scope on the ALC5651's pins 28 and 29 while the
+  target plays audio. Patch 0013, the rail-voltage fix this turned up, is
   worth keeping regardless of what that scope says.
 * **Thermal headroom, not cpufreq.** DVFS works now (`=m`, loaded from
   systemd; see patches.md), and the CPU encoder that was the board's main
@@ -716,17 +755,22 @@ Checked and rejected:
   headroom now converts directly into CPU frequency, which was not true
   before - with no cooling device bound to `cpu-thermal`, extra headroom had
   nothing to spend itself on.
-* **`vcgencmd` noise** - kvmd polls a Raspberry Pi throttling interface every
-  five seconds and logs a failure each time. Harmless, fills the journal.
-* **Wi-Fi credentials.** The hardware works - mainline `brcmfmac` on the
-  AP6356S, see patches.md - and is verified as far as it can be without
-  someone's password: `wlan0` comes up and scans 2.4 and 5 GHz. `wlan.network`
-  is installed, but nothing associates without an SSID and a passphrase,
-  which are not ours to ship. Verified end to end once with real ones:
-  associates, gets DHCP, survives a reboot, wired stays preferred. One
-  caveat that is the router's problem rather than ours - the BCM4356
-  firmware does not scan 5 GHz DFS channels (52-144), so an AP on channel
-  108 is invisible; use 36-48 or 149-165.
-  `/etc/wpa_supplicant/README` is the whole procedure. Deliberately not
-  enabled by default: a `wpa_supplicant` with no network block fails at
-  boot, and most of these boards will only ever use the wired port.
+* **ATX** - pins chosen, hardware not built. Ships disabled; see
+  docs/hardware.md for what to build and docs/known-issues.md for why it is
+  off.
+* **Capture modes other than 1080p60** - see "Modes not yet verified" in
+  docs/known-issues.md.
+
+## Wi-Fi, in detail
+
+The hardware works - mainline `brcmfmac` on the AP6356S, see patches.md - and
+is verified as far as it can be without someone's password: `wlan0` comes up
+and scans 2.4 and 5 GHz. `wlan.network` is installed, but nothing associates
+without an SSID and a passphrase, which are not ours to ship. Verified end to
+end once with real ones: associates, gets DHCP, survives a reboot, wired stays
+preferred. One caveat that is the router's problem rather than ours - the
+BCM4356 firmware does not scan 5 GHz DFS channels (52-144), so an AP on
+channel 108 is invisible; use 36-48 or 149-165. `/etc/wpa_supplicant/README`
+is the whole procedure. Deliberately not enabled by default: a
+`wpa_supplicant` with no network block fails at boot, and most of these boards
+will only ever use the wired port.

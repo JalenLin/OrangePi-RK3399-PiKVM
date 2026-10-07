@@ -131,8 +131,9 @@ cat <<'NOTE'
   If the stream is up and you want to know whether it is really the hardware
   doing the work, this script is the slow way to find out. The fast way:
 
-    grep -c . /sys/kernel/debug/mpp_service/session_summary   # sessions
-    cat /sys/class/devfreq/*/cur_freq                         # VPU clock
+    cat /proc/mpp_service/sessions-summary     # one row per encoder
+    grep ff650000.vepu /proc/interrupts        # rises while encoding
 
-  A VPU parked at 50 MHz with the stream running means something fell back.
+  No VEPU2 sessions, or an interrupt count standing still, with the stream
+  running means ustreamer fell back to the CPU encoder.
 NOTE
