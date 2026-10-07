@@ -1,0 +1,434 @@
+libv4l-rkmpp: let the VPU read the capture buffer in place
+
+Companion to 0001 and 0002. Those made the encoders reachable; this
+makes them cheap. Measured against ustreamer 6.65 on an OrangePi RK3399
+at 1080p60, with kvmd launching the streamer as it does in production:
+ustreamer went from 86% of a core to 9%, and the JPEG stream from 30 fps
+to ~45 fps, with byte-identical output.
+
+1. Encoder input dma-bufs were copied, not imported.
+
+   A client that queues a raw frame as V4L2_MEMORY_DMABUF - which is
+   what ustreamer does for H.264, and for JPEG in m2m-video mode - gets
+   no benefit from it here. rkmpp_copy_buffer() maps the dma-buf and
+   memcpy()s it into one of the plugin's own MPP buffers, every frame.
+   ustreamer reports "DMA=1" and the copy happens anyway, one layer down.
+
+   That copy is not cheap. The frame comes from the ISP, a non-coherent
+   device, so the CPU sees the buffer uncached: copying 4 MB of 1080p
+   YUYV out of it measured ~27 ms of a core per frame, and two JPEG
+   workers at 30 fps spent ~80% of a core doing nothing else. The VPU
+   needs none of it - VEPU2 reads its input by fd through its own IOMMU,
+   and MPP's EXT_DMA allocator only maps a buffer if someone asks for a
+   CPU pointer, which the encoder path never does.
+
+   Import the dma-buf with mpp_buffer_import() and hand that to the
+   encoder instead. The import is held from QBUF until the packet comes
+   back, i.e. until the hardware has finished reading, and dropped
+   before the buffer is returned to the client.
+
+   The buffer has to cover what the hardware reads, not what the frame
+   holds, and those differ: VEPU2 fetches whole macroblock rows, so a
+   1080-line frame is read as 1088 lines. Given a buffer of exactly 1080
+   the encoder's IOMMU faulted on the first address past the end
+   (buffer + 1081 * stride), the VPU hung, and MPP reset it. The plugin's
+   own buffers are sized from the macroblock-rounded format, which is
+   why the copy never had this problem. So import only a dma-buf at
+   least that large and copy anything smaller, as before. Kernel patch
+   0014 makes the ISP allocate capture buffers that pass this check;
+   without it every frame is copied and nothing is worse than it was.
+
+   "import-dmabuf=0" in the device file turns the import off, for A/B
+   comparison.
+
+2. JPEG quality was lost on the way through m2m-video.
+
+   ustreamer only hands over the dma-buf in --encoder=m2m-video mode,
+   and that mode has no quality control: it converts --quality into a
+   bitrate and sends V4L2_CID_MPEG_VIDEO_BITRATE. The quality factor is
+   pinned here (see rkmpp_enc_apply_mjpeg_cfg), so the bitrate did
+   nothing and every --quality encoded as 80 - measured, q30 to q95
+   gave byte-identical frames. kvmd's quality setting would have stopped
+   working without a word.
+
+   ustreamer's conversion is deterministic and one-to-one over 1..100
+   (us_m2m_mjpeg_encoder_init in src/ustreamer/m2m.c), so read the
+   quality back out of it. Rather than invert it in floating point, run
+   it forward for every quality and accept only an exact match; a
+   bitrate that matches nothing leaves the quality alone instead of
+   guessing. An explicit V4L2_CID_JPEG_COMPRESSION_QUALITY still wins.
+
+   It is resolved when the JPEG configuration is applied, not when the
+   control arrives, because ustreamer sets its controls before its
+   format, and until the format is set the encoder does not yet know it
+   is a JPEG one.
+
+   Verified: m2m-video at q30, q50, q80 and q95 produces the same bytes
+   as m2m-image at the same quality, so a static screen still encodes to
+   identical frames and --drop-same-frames still drops them.
+
+diff --git a/include/libv4l-rkmpp-enc.h b/include/libv4l-rkmpp-enc.h
+index bdf8fc3..ba92cb0 100644
+--- a/include/libv4l-rkmpp-enc.h
++++ b/include/libv4l-rkmpp-enc.h
+@@ -68,6 +68,8 @@ struct rkmpp_enc_context {
+ 
+ 	struct {
+ 		int quality;
++		/* Set by V4L2_CID_JPEG_COMPRESSION_QUALITY, which then wins. */
++		bool quality_set;
+ 	} mjpeg;
+ 
+ 	enum {
+diff --git a/include/libv4l-rkmpp.h b/include/libv4l-rkmpp.h
+index f71e2c3..095eb5a 100644
+--- a/include/libv4l-rkmpp.h
++++ b/include/libv4l-rkmpp.h
+@@ -185,6 +185,12 @@ enum rkmpp_buffer_flag {
+ struct rkmpp_buffer {
+ 	TAILQ_ENTRY(rkmpp_buffer) entry;
+ 	MppBuffer rkmpp_buf;
++	/*
++	 * The caller's dma-buf, imported for one frame instead of copied into
++	 * rkmpp_buf. Held from QBUF until the encoder has the packet, i.e.
++	 * until the hardware is done reading it. NULL when not in use.
++	 */
++	MppBuffer import_buf;
+ 
+ 	int index;
+ 
+@@ -249,6 +255,9 @@ struct rkmpp_buf_queue {
+ 	 */
+ 	uint32_t visible_width;
+ 	uint32_t visible_height;
++
++	/* Set once an input dma-buf was too small to import. */
++	bool import_refused;
+ };
+ 
+ /**
+@@ -309,6 +318,9 @@ struct rkmpp_context {
+ 	unsigned int max_height;
+ 	char *codecs;
+ 
++	/* Import encoder input dma-bufs rather than copy them. */
++	bool import_dmabuf;
++
+ 	void *data;
+ };
+ 
+@@ -496,6 +508,8 @@ void rkmpp_finish_flushing(struct rkmpp_context *ctx,
+ int rkmpp_to_v4l2_buffer(struct rkmpp_context *ctx,
+ 			 struct rkmpp_buffer *rkmpp_buffer,
+ 			 struct v4l2_buffer *buffer);
++void rkmpp_release_import(struct rkmpp_buffer *rkmpp_buffer);
++
+ int rkmpp_from_v4l2_buffer(struct rkmpp_context *ctx,
+ 			   struct v4l2_buffer *buffer,
+ 			   struct rkmpp_buffer *rkmpp_buffer);
+diff --git a/meson.build b/meson.build
+index 1ccb442..42c31c5 100644
+--- a/meson.build
++++ b/meson.build
+@@ -9,6 +9,9 @@ project(
+ libthreads_dep = dependency('threads')
+ libv4l_dep = dependency('libv4l2')
+ mpp_dep = dependency('rockchip_mpp')
++# log10()/round(), for the MJPEG quality the encoder reads back out of a
++# bitrate. MPP's .pc happens to pull libm in too; do not rely on it.
++libm_dep = meson.get_compiler('c').find_library('m', required : false)
+ 
+ cdata = configuration_data()
+ 
+@@ -27,6 +30,7 @@ deps = [
+   libthreads_dep,
+   libv4l_dep,
+   mpp_dep,
++  libm_dep,
+ ]
+ 
+ srcs = [
+diff --git a/src/libv4l-rkmpp-enc.c b/src/libv4l-rkmpp-enc.c
+index f6ffadf..639c4fb 100644
+--- a/src/libv4l-rkmpp-enc.c
++++ b/src/libv4l-rkmpp-enc.c
+@@ -12,6 +12,7 @@
+  *  GNU General Public License for more details.
+  */
+ 
++#include <math.h>
+ #include <signal.h>
+ #include <unistd.h>
+ 
+@@ -141,6 +142,42 @@ static struct rkmpp_fmt rkmpp_enc_fmts[] = {
+ 
+ static int rkmpp_enc_apply_rc_cfg(struct rkmpp_enc_context *enc);
+ 
++/*
++ * Recover the JPEG quality a client meant from the bitrate it sent.
++ *
++ * ustreamer has two ways to drive a hardware JPEG encoder and they differ in
++ * exactly the wrong place. --encoder=m2m-image sets
++ * V4L2_CID_JPEG_COMPRESSION_QUALITY but always copies each frame into the
++ * encoder's buffer; --encoder=m2m-video hands over the capture dma-buf
++ * instead, which is what lets the VPU read the frame in place, but has no
++ * quality control at all - it turns --quality into a bitrate and sends
++ * V4L2_CID_MPEG_VIDEO_BITRATE. The quality factor here is pinned (see
++ * rkmpp_enc_apply_mjpeg_cfg), so that bitrate does nothing, and every
++ * --quality became 80: kvmd's quality setting silently stopped working.
++ *
++ * The conversion is deterministic - us_m2m_mjpeg_encoder_init() in
++ * ustreamer's src/ustreamer/m2m.c - and one-to-one over 1..100, so the
++ * quality can be read back out. Rather than invert it in floating point,
++ * run it forward for every quality and accept only an exact match. A
++ * bitrate that matches nothing - a different client, or a ustreamer that
++ * changed its formula - leaves the quality alone instead of guessing.
++ */
++static int rkmpp_mjpeg_quality_from_bitrate(int bitrate)
++{
++	const double b_min = 25, b_max = 20000, step = 25;
++	int quality;
++
++	for (quality = 1; quality <= 100; quality++) {
++		double kbps = log10(quality) * (b_max - b_min) / 2 + b_min;
++
++		kbps = step * round(kbps / step);
++		if ((int)(kbps * 1000) == bitrate)
++			return quality;
++	}
++
++	return 0;
++}
++
+ static int rkmpp_put_frame(struct rkmpp_enc_context *enc)
+ {
+ 	struct rkmpp_context *ctx = enc->ctx;
+@@ -194,7 +231,10 @@ static int rkmpp_put_frame(struct rkmpp_enc_context *enc)
+ 	mpp_frame_set_ver_stride(frame, enc->vstride);
+ 	mpp_frame_set_fmt(frame, rkmpp_fmt->format);
+ 
+-	mpp_frame_set_buffer(frame, rkmpp_buffer->rkmpp_buf);
++	/* The frame takes its own reference; ours goes once encoded. */
++	mpp_frame_set_buffer(frame, rkmpp_buffer->import_buf ?
++			     rkmpp_buffer->import_buf :
++			     rkmpp_buffer->rkmpp_buf);
+ 
+ 	/* Use pts to track frame buffer */
+ 	mpp_frame_set_pts(frame, rkmpp_buffer->index);
+@@ -399,6 +439,13 @@ static void *encoder_thread_fn(void *data)
+ 
+ 		rkmpp_buffer->timestamp = frame_buffer->timestamp;
+ 
++		/*
++		 * The packet is out, so the hardware has finished reading the
++		 * input. Let go of an imported dma-buf before the caller can
++		 * dequeue the buffer and recycle what is behind it.
++		 */
++		rkmpp_release_import(frame_buffer);
++
+ 		LOGV(2, "return frame: %d(%" PRIu64 ")\n",
+ 		     index, frame_buffer->timestamp);
+ 
+@@ -565,8 +612,30 @@ static int rkmpp_enc_apply_mjpeg_cfg(struct rkmpp_enc_context *enc)
+ 	 * and an idle screen went from 1 fps on the wire to 12.
+ 	 */
+ 	{
+-		const int qf = enc->mjpeg.quality ? enc->mjpeg.quality : 80;
++		int qf = enc->mjpeg.quality;
++
++		/*
++		 * A client that never set the quality may have sent it as a
++		 * bitrate instead - see rkmpp_mjpeg_quality_from_bitrate().
++		 * Resolved here rather than when the control arrives, because
++		 * ustreamer sets its controls before its format, and until the
++		 * format is set this encoder does not know it is a JPEG one.
++		 */
++		if (!enc->mjpeg.quality_set && enc->bitrate) {
++			int from_bitrate =
++				rkmpp_mjpeg_quality_from_bitrate(enc->bitrate);
++
++			if (from_bitrate)
++				qf = from_bitrate;
++			else
++				LOG("bitrate %d maps to no JPEG quality\n",
++				    enc->bitrate);
++		}
+ 
++		if (!qf)
++			qf = 80;
++
++		LOGV(1, "jpeg quality: %d\n", qf);
+ 		mpp_enc_cfg_set_s32(cfg, "jpeg:q_factor", qf);
+ 		mpp_enc_cfg_set_s32(cfg, "jpeg:qf_min", qf);
+ 		mpp_enc_cfg_set_s32(cfg, "jpeg:qf_max", qf);
+@@ -1204,6 +1273,13 @@ static int rkmpp_enc_s_ext_ctrls(struct rkmpp_enc_context *enc,
+ 			enc->bitrate = ctrl->value;
+ 			LOGV(1, "bitrate: %d\n", enc->bitrate);
+ 
++			if (enc->type == MJPEG && !enc->mjpeg.quality_set &&
++			    ctx->mpp_streaming &&
++			    rkmpp_enc_apply_mjpeg_cfg(enc) < 0) {
++				LOGE("failed to apply compression quality\n");
++				RETURN_ERR(errno, -1);
++			}
++
+ 			if (ctx->mpp_streaming &&
+ 			    rkmpp_enc_apply_rc_cfg(enc) < 0) {
+ 				LOGE("failed to apply bitrate\n");
+@@ -1387,6 +1463,7 @@ static int rkmpp_enc_s_ext_ctrls(struct rkmpp_enc_context *enc,
+ 			break;
+ 		case V4L2_CID_JPEG_COMPRESSION_QUALITY:
+ 			enc->mjpeg.quality = ctrl->value;
++			enc->mjpeg.quality_set = true;
+ 			LOGV(1, "jpeg quality: %d\n", enc->mjpeg.quality);
+ 
+ 			if (ctx->mpp_streaming &&
+diff --git a/src/libv4l-rkmpp.c b/src/libv4l-rkmpp.c
+index b4ab694..4ec6b08 100644
+--- a/src/libv4l-rkmpp.c
++++ b/src/libv4l-rkmpp.c
+@@ -92,6 +92,7 @@ static void rkmpp_destroy_buffers(struct rkmpp_buf_queue *queue)
+ 
+ 	if (queue->buffers) {
+ 		for (i = 0; i < queue->num_buffers; i++) {
++			rkmpp_release_import(&queue->buffers[i]);
+ 			if (rkmpp_buffer_locked(&queue->buffers[i]))
+ 				mpp_buffer_put(queue->buffers[i].rkmpp_buf);
+ 		}
+@@ -131,6 +132,8 @@ void rkmpp_reset_queue(struct rkmpp_context *ctx,
+ 	for (i = 0; i < queue->num_buffers; i++) {
+ 		rkmpp_buffer = &queue->buffers[i];
+ 
++		rkmpp_release_import(rkmpp_buffer);
++
+ 		if (rkmpp_buffer_error(rkmpp_buffer))
+ 			rkmpp_buffer_clr_error(rkmpp_buffer);
+ 
+@@ -935,6 +938,7 @@ static int rkmpp_parse_options(struct rkmpp_context *ctx, int fd)
+ #define OPT_MAX_WIDTH "max-width="
+ #define OPT_MAX_HEIGHT "max-height="
+ #define OPT_CODECS "codecs="
++#define OPT_IMPORT_DMABUF "import-dmabuf="
+ #define OPT_MATCH(o) (!strncmp(option, o, strlen(o)))
+ #define OPT_VALUE_INT(o) (atoi(&option[strlen(o)]))
+ #define OPT_VALUE_STR(o) (&option[strlen(o)])
+@@ -986,6 +990,8 @@ static int rkmpp_parse_options(struct rkmpp_context *ctx, int fd)
+ 			if (ctx->codecs)
+ 				free(ctx->codecs);
+ 			ctx->codecs = strdup(OPT_VALUE_STR(OPT_CODECS));
++		} else if (OPT_MATCH(OPT_IMPORT_DMABUF)) {
++			ctx->import_dmabuf = !!OPT_VALUE_INT(OPT_IMPORT_DMABUF);
+ 		} else {
+ 			LOGV(1, "unknown options\n");
+ 			RETURN_ERR(ENODEV, -1);
+@@ -1021,6 +1027,8 @@ static void *plugin_init(int fd)
+ 	if (!ctx)
+ 		RETURN_ERR(ENOMEM, NULL);
+ 
++	ctx->import_dmabuf = true;
++
+ 	if (rkmpp_parse_options(ctx, fd) < 0){
+ 		LOGV(1, "failed to parse option\n");
+ 		goto err_free_ctx;
+diff --git a/src/utils.c b/src/utils.c
+index b88a276..56e7dec 100644
+--- a/src/utils.c
++++ b/src/utils.c
+@@ -13,9 +13,80 @@
+  */
+ 
+ #include <sys/mman.h>
++#include <unistd.h>
+ 
+ #include "libv4l-rkmpp.h"
+ 
++void rkmpp_release_import(struct rkmpp_buffer *rkmpp_buffer)
++{
++	if (!rkmpp_buffer->import_buf)
++		return;
++
++	mpp_buffer_put(rkmpp_buffer->import_buf);
++	rkmpp_buffer->import_buf = NULL;
++}
++
++/*
++ * Hand the caller's dma-buf to MPP as it is, instead of mapping it and
++ * copying it into one of our own buffers.
++ *
++ * The copy is the expensive part of this plugin by a wide margin. A capture
++ * buffer exported by a non-coherent device is mapped uncached, so the CPU
++ * reads it at a fraction of normal memory speed: a 1080p YUYV frame is 4 MB,
++ * and copying it out cost ~27 ms of a core per frame on RK3399 - more than
++ * the encoder spent on the frame. The hardware does not need any of that.
++ * VEPU2 reads its input by fd through its own IOMMU, and MPP's EXT_DMA
++ * allocator only maps a buffer if somebody asks for a CPU pointer, which the
++ * encoder path does not.
++ *
++ * The buffer has to cover what the hardware reads, not what the frame
++ * holds, and those differ. VEPU2 reads whole macroblock rows, so a 1080-line
++ * frame is fetched as 1088 lines: given a buffer of exactly 1080, the last
++ * row runs off the end and the encoder's IOMMU faults on the first address
++ * past it (measured: a read at buffer + 1081 * stride, then a hung VPU and a
++ * reset). Our own buffers are sized from the macroblock-rounded format, so
++ * the copy never had this problem. Import only a dma-buf at least that big;
++ * anything smaller - which is every capture buffer that is sized to its
++ * frame exactly - is copied as before.
++ *
++ * Returns 0 when imported, -1 to fall back to copying.
++ */
++static int rkmpp_import_dmabuf(struct rkmpp_buf_queue *queue,
++			       struct rkmpp_buffer *rkmpp_buffer)
++{
++	int fd = rkmpp_buffer->planes[0].fd;
++	uint32_t need = queue->format.plane_fmt[0].sizeimage;
++	MppBufferInfo info;
++	off_t size;
++
++	rkmpp_release_import(rkmpp_buffer);
++
++	size = lseek(fd, 0, SEEK_END);
++	if (size <= 0 || (uint64_t)size < need) {
++		if (!queue->import_refused)
++			LOG("dma-buf %d is %ld bytes, the encoder reads %u: "
++			    "copying instead\n", fd, (long)size, need);
++		queue->import_refused = true;
++		return -1;
++	}
++
++	memset(&info, 0, sizeof(info));
++	info.type = MPP_BUFFER_TYPE_EXT_DMA;
++	info.fd = fd;
++	info.size = size;
++	info.index = rkmpp_buffer->index;
++
++	if (mpp_buffer_import(&rkmpp_buffer->import_buf, &info) != MPP_OK) {
++		LOGE("failed to import dma-buf %d\n", fd);
++		rkmpp_buffer->import_buf = NULL;
++		return -1;
++	}
++
++	LOGV(2, "imported dma-buf %d (%ld bytes) for buffer %d\n",
++	     fd, (long)size, rkmpp_buffer->index);
++	return 0;
++}
++
+ static int rkmpp_copy_buffer(struct rkmpp_context *ctx,
+ 			     struct rkmpp_buffer *rkmpp_buffer,
+ 			     struct v4l2_buffer *buffer, int copy_to)
+@@ -42,6 +113,16 @@ static int rkmpp_copy_buffer(struct rkmpp_context *ctx,
+ 	if (!queue)
+ 		return -1;
+ 
++	/* Raw frames into an encoder: let the hardware read them in place. */
++	if (!copy_to && buffer->memory == V4L2_MEMORY_DMABUF &&
++	    !ctx->is_decoder && ctx->import_dmabuf &&
++	    queue == &ctx->output && buffer->length == 1 &&
++	    !rkmpp_buffer->planes[0].data_offset &&
++	    !rkmpp_import_dmabuf(queue, rkmpp_buffer)) {
++		LEAVE();
++		return 0;
++	}
++
+ 	rkmpp_ptr = mpp_buffer_get_ptr(rkmpp_buffer->rkmpp_buf);
+ 
+ 	/* Prepare access */

@@ -1,0 +1,49 @@
+diff --git a/drivers/media/platform/rockchip/isp1/capture.c b/drivers/media/platform/rockchip/isp1/capture.c
+index 894e30e2f..b92c771e8 100644
+--- a/drivers/media/platform/rockchip/isp1/capture.c
++++ b/drivers/media/platform/rockchip/isp1/capture.c
+@@ -1290,17 +1290,43 @@ static int rkisp1_queue_setup(struct vb2_queue *queue,
+ 	struct rkisp1_device *dev = stream->ispdev;
+ 	const struct v4l2_pix_format_mplane *pixm = NULL;
+ 	const struct capture_fmt *isp_fmt = NULL;
++	u32 pad_rows;
+ 	u32 i;
+ 
+ 	pixm = &stream->out_fmt;
+ 	isp_fmt = &stream->out_isp_fmt;
+ 	*num_planes = isp_fmt->mplanes;
+ 
++	/*
++	 * Allocate every plane as if the frame were a whole number of 16-line
++	 * macroblock rows tall, while sizeimage and the payload stay the frame
++	 * itself.
++	 *
++	 * These buffers are handed straight to the VPU as dma-bufs, and the
++	 * VEPU2 encoder fetches its input in macroblock rows: a 1080-line frame
++	 * is read as 1088 lines whatever the frame size says. With the buffer
++	 * sized to the frame exactly, the last row runs past the end, the VPU's
++	 * IOMMU faults on the first address beyond it - measured at buffer +
++	 * 1081 * bytesperline - and the encoder hangs until MPP resets it. So
++	 * the reader can only import the buffer if the allocation covers what
++	 * the hardware reads, and it is copied instead, which at 1080p YUYV
++	 * costs most of a core: 4 MB a frame read through an uncached mapping.
++	 *
++	 * Padding the allocation and nothing else keeps every consumer that
++	 * reads sizeimage or bytesused seeing the same frame as before; only a
++	 * consumer that asks how big the buffer is learns that there is more
++	 * room behind it. For 1080p YUYV that is 8 rows, 30 KB per buffer.
++	 * Using plane 0's stride also covers a single-buffer semi-planar
++	 * format, whose chroma tail overruns by no more than its luma does.
++	 */
++	pad_rows = ALIGN(pixm->height, 16) - pixm->height;
++
+ 	for (i = 0; i < isp_fmt->mplanes; i++) {
+ 		const struct v4l2_plane_pix_format *plane_fmt;
+ 
+ 		plane_fmt = &pixm->plane_fmt[i];
+-		sizes[i] = plane_fmt->sizeimage;
++		sizes[i] = plane_fmt->sizeimage +
++			   plane_fmt->bytesperline * pad_rows;
+ 	}
+ 
+ 	v4l2_dbg(1, rkisp1_debug, &dev->v4l2_dev, "%s count %d, size %d\n",

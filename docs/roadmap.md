@@ -152,9 +152,31 @@ Three pieces of work, in dependency order:
 
 ### What mainline buys us
 
-`hantro` exposes the RK3399 VPU's **JPEG encoder as a V4L2 M2M device**, so
-ustreamer can switch from `--encoder=cpu` to `--encoder=m2m-image` and stop
-burning the A72s on MJPEG. That alone may justify the track.
+Less than this section used to claim. It said `hantro` exposes the VPU's
+JPEG encoder as a V4L2 M2M device, so ustreamer could stop burning the A72s
+on MJPEG, and that this alone might justify the track. Both halves were
+overtaken, and the second was checked on hardware in 2026-10:
+
+* **The BSP track already has the encoder.** MPP drives the same VEPU2, for
+  JPEG *and* H.264 - see "Where this ended up" below. `hantro` and MPP are
+  two drivers for one block, not two encoders: `rk3399.dtsi` describes
+  `video-codec@ff650000` and `vepu@ff650000` over the same registers and the
+  same interrupt, and only one can be enabled.
+* **Switching would cost H.264.** `hantro` on RK3399 is
+  `HANTRO_JPEG_ENCODER | MPEG2_DECODER | VP8_DECODER` - no H.264 encoder.
+  Mainline has no stateless encoding uAPI merged either; the nearest work
+  was an RFC for the i.MX8MP's VC8000E (2025) and a stateful driver for
+  RK3576's VEPU510 (2026), nothing for VEPU2. And ustreamer only speaks the
+  stateful API, so a stateless encoder would not reach it anyway.
+* **The CPU was never the encoder's.** What was left after hardware JPEG was
+  a 4 MB copy per frame out of an uncached capture buffer, and `hantro` would
+  have needed the same copy: ustreamer's `m2m-image` path never passes
+  dma-bufs. Removing the copy took a plugin patch and a kernel patch on the
+  BSP track - "Where this ended up" again.
+
+So for the encoder, mainline offers a subset of what is already running.
+The case for it is the one CLAUDE.md makes - current code - and its cost is
+unchanged: TC358749 support and `rkisp1` at 1080p60 YUV422, below.
 
 ### H.264, and therefore WebRTC
 
@@ -301,6 +323,18 @@ VPU: six defects, four of them the plugin refusing to expose things it had
 already implemented. See patches.md. Result: ustreamer went from 316% CPU to
 50%, the SoC from 78 C to 62 C, and the big cluster stopped being thermally
 throttled.
+
+**Then the copy went too.** The 50-90% left over was not encoding. Per-thread
+accounting put it in the two JPEG worker threads, all user time, and
+`m2m-video` - where ustreamer passes a dma-buf rather than copying - cost
+exactly the same, because the plugin copied the dma-buf instead. A 1080p
+frame is 4 MB read out of a buffer the CPU sees uncached: 18 ms of a core,
+against 4 ms out of ordinary memory. `patches/libv4l-rkmpp/0003` imports the
+dma-buf so VEPU2 reads it in place, kernel 0014 sizes capture buffers for the
+1088 lines VEPU2 actually fetches (an exact-size buffer faulted its IOMMU),
+and the plugin reads `--quality` back out of the bitrate `m2m-video` turns it
+into. As kvmd runs it at 1080p60: 86% to 9%, JPEG 30 fps to ~45, output
+byte-identical. The H.264 sink's own copy went with it, 55% to 4%.
 
 **H.264 followed, through the same door**, and it is verified on hardware -
 `ffprobe` on the live sink reports Constrained Baseline, level 40, 1920x1080,

@@ -84,9 +84,9 @@ kvmd:
             # installed and the VPU is present, software JPEG otherwise. See
             # usr/lib/pikvm/ustreamer-encoder for why it is a wrapper and not
             # an argument, and docs/roadmap.md for how the hardware path got
-            # here. Like upstream v2 the wrapper asks for "m2m-image"; the
-            # V4L2_PIX_FMT_JPEG that mode requires is one of the things
-            # patches/libv4l-rkmpp adds to the plugin.
+            # here. Unlike upstream v2 the wrapper asks for "m2m-video", the
+            # mode in which ustreamer hands the encoder the capture buffer
+            # instead of a copy of it; the wrapper explains the trade.
             - "--quality={quality}"
             - "--desired-fps={desired_fps}"
             # 30 is what upstream PiKVM ships; ustreamer's own default is

@@ -69,24 +69,39 @@ if [ "${hw}" = yes ]; then
         set -- --h264-m2m-device="${H264_DEV}" "$@"
     fi
 
-    # m2m-image, not m2m-video. Both reach the same MPP encoder, but
-    # m2m-image is the JPEG-shaped API: it passes --quality through as
-    # V4L2_CID_JPEG_COMPRESSION_QUALITY instead of converting it into a
-    # bitrate for a rate controller, so quality is fixed and identical
-    # frames encode identically - which is what makes --drop-same-frames
-    # work. It also uses mmap rather than importing dma-bufs.
+    # m2m-video, not m2m-image, although this is a JPEG stream. Both reach
+    # the same MPP encoder; what differs is how the frame gets there.
+    # m2m-image always copies it into the encoder's own buffer first, and
+    # that copy was most of what this process cost: 4 MB a frame at 1080p,
+    # read out of a capture buffer the CPU only sees uncached, ~27 ms of a
+    # core per frame. m2m-video hands the encoder the capture buffer itself
+    # as a dma-buf, and VEPU2 reads it in place. Measured at 1080p60:
+    # 89% CPU at 30 fps became 18% at 46 fps, with byte-identical JPEGs.
     #
-    # Two workers, not one and not four. One serialises the memcpy into the
-    # encoder's buffer with the wait for the hardware, which caps the stream
-    # at ~19 fps - the VPU is idle half the time. Two overlaps them and
-    # reaches the ~30 fps the encoder path can sustain. A third buys 1 fps
-    # for another 12% of a core, and each worker is a separate MPP encoder
-    # instance contending for the one VPU, so more is not better.
+    # It takes two changes of ours, and without either it degrades to the
+    # copy rather than failing. libv4l-rkmpp/0003 makes the plugin import
+    # the dma-buf instead of copying out of it, and kernel 0014 allocates
+    # capture buffers in whole macroblock rows - VEPU2 reads 1088 lines of
+    # a 1080-line frame, and an exact-size buffer makes its IOMMU fault.
+    # The plugin checks the buffer size and copies when it is short.
+    #
+    # The price of m2m-video is that ustreamer sends --quality as a bitrate,
+    # not as V4L2_CID_JPEG_COMPRESSION_QUALITY. The plugin maps that bitrate
+    # back to the quality it was computed from (also 0003), so the quality
+    # factor is pinned exactly as m2m-image pinned it: identical frames still
+    # encode to identical bytes, which is what --drop-same-frames needs.
+    #
+    # Two workers. With the copy gone one already reaches ~45 fps at 1080p,
+    # two cost nothing measurable on top, and two are what keeps the stream
+    # at ~30 fps if the plugin ever has to fall back to copying - there, one
+    # worker serialises the copy with the wait for the hardware and stalls
+    # at ~19. Each worker is a separate MPP instance on the one VPU, so more
+    # than that buys a few fps at best.
     #
     # --workers applies to the JPEG encoder only; the H.264 sink runs one
     # encoder regardless, which is what H.264 wants anyway - a second
     # instance would have its own reference frames and its own GOP.
-    exec /usr/bin/ustreamer --encoder=m2m-image --m2m-device="${MJPEG_DEV}" \
+    exec /usr/bin/ustreamer --encoder=m2m-video --m2m-device="${MJPEG_DEV}" \
         --workers=2 "$@"
 fi
 

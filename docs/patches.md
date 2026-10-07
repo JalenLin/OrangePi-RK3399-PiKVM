@@ -1,6 +1,6 @@
 # The patches, and why each one exists
 
-Thirteen kernel patches, one U-Boot patch and two userspace ones. They are
+Fourteen kernel patches, one U-Boot patch and three userspace ones. They are
 applied in filename order by plain `git apply` — no fuzz, no `--3way` — so a
 patch either applies or the build stops.
 
@@ -12,8 +12,9 @@ They are not all the same kind of thing, and the split is deliberate:
 | **0002** | MMC node names | ours; works around the vendor U-Boot |
 | **0003–0012** | driver fixes | bugs anyone on this hardware hits. One fix per patch, so they stay submittable |
 | **0013** | codec rail voltages | a defect the upstream DTS has too — mainline's copy of this board file is byte-for-byte identical |
+| **0014** | capture buffer allocation | makes the ISP's buffers safe to hand to the VPU as they are; harmless to every other consumer |
 | **uboot/0001** | autoboot delay and console rate | two defconfig lines; the difference between a debuggable board and one you can only recover over USB |
-| **libv4l-rkmpp/0001–0002** | userspace | applied inside the rootfs build |
+| **libv4l-rkmpp/0001–0003** | userspace | applied inside the rootfs build |
 
 If you add one, keep that distinction. A patch that mixes a board choice with
 a driver fix cannot be sent anywhere.
@@ -631,6 +632,46 @@ left alone.
 
 Applies standalone.
 
+## 0014 — isp1: allocate capture buffers in whole macroblock rows
+
+`drivers/media/platform/rockchip/isp1/capture.c`
+
+Every capture buffer is now allocated `bytesperline * (ALIGN(height, 16) -
+height)` bytes larger than the frame - 8 rows, 30 KB, at 1080p. `sizeimage`
+and the payload are untouched, so anything that reads the frame sees exactly
+what it saw before; only a consumer that asks how big the *buffer* is finds
+room behind it.
+
+That consumer is the VPU. Since libv4l-rkmpp/0003, ustreamer's capture
+buffers go to VEPU2 as dma-bufs instead of being copied, and VEPU2 fetches
+its input in whole 16-line macroblock rows: a 1080-line frame is read as
+1088. With the buffer sized to the frame exactly, the last row runs off the
+end. Measured, on the first attempt:
+
+```
+rk_iommu ff650800.iommu: Page fault at 0x00000000ff3f5700 of type read
+rk_vcodec: mpp_task_dump_mem_region: reg[ 48]: 0x00000000ff000000, size 3f5000
+rk_vcodec: mpp_task_timeout_work: session 18:14 task 2241 processing time out!
+mpp_vepu2 ff650000.vepu: resetting...
+```
+
+The input is mapped at `0xff000000` for `0x3f5000` bytes - 1080 rows of
+3840, rounded to a page - and the fault is at `+0x3f5700`, which is row 1081
+exactly. VEPU2 does have fill registers for a partial last row (`y_fill` for
+JPEG, `OVRFLB` for H.264), and reading MPP's HAL suggests they replicate
+pixels rather than fetch them. They do not stop the fetch. The fault is the
+evidence; the HAL was not.
+
+Expect a burst of collateral when it happens: the timeout dumps a few hundred
+register lines to the 115200 serial console, the board stalls for about two
+seconds while they drain, and an unrelated `rk3x-i2c ... timeout` and a
+capture `select()` timeout land in that window. Neither is a second fault.
+
+The plugin checks the size before it imports and copies a buffer that is too
+short, so without this patch nothing breaks - every frame is just copied, as
+before. With it, 1080p capture buffers pass the check and the copy is gone.
+720p never needed it: 720 is already a multiple of 16.
+
 ## uboot/0001 — an autoboot you can interrupt, at a rate you can type at
 
 Two lines of the vendor's `configs/rk3399_defconfig`.
@@ -857,6 +898,68 @@ no longer what a client gets when it asked for the opposite.
 reqbufs->count`), so "one buffer per queue" is really one, not a minimum the
 plugin rounds up.
 
+## libv4l-rkmpp/0003 — let the VPU read the capture buffer in place
+
+0001 and 0002 made the encoders reachable; this one makes them cheap. What
+was left after 0001 was not the encoder. Two JPEG workers spent ~80% of a
+core between them at 1080p, nearly all of it user time, and the VPU was idle
+a good part of each frame.
+
+The cost was a copy, and it was the same copy in every mode. ustreamer's
+`m2m-image` copies each frame into the encoder's buffer itself. Its
+`m2m-video` mode passes the capture buffer as a dma-buf instead - "DMA=1"
+in its log - and the plugin then mapped that dma-buf and `memcpy()`d it
+into one of its own buffers. Switching modes moved the copy one layer down
+and changed nothing else: 87% against 89%.
+
+And the copy is slow for a reason worth knowing. The capture buffer belongs
+to the ISP, a non-coherent device, so the CPU sees it uncached. Measured with
+`v4l2-ctl --stream-to`: copying a 1080p YUYV frame out of a capture buffer
+took 18.4 ms of CPU, against 3.9 ms for the same 4 MB out of ordinary memory.
+
+The patch has two halves.
+
+**Import instead of copy.** A raw frame queued as a dma-buf is handed to MPP
+with `mpp_buffer_import()` (`MPP_BUFFER_TYPE_EXT_DMA`) and goes straight to
+the encoder. VEPU2 reads it by fd through its own IOMMU; MPP's EXT_DMA
+allocator only maps a buffer for a CPU pointer, which the encoder path never
+asks for. The import is held until the packet is out and released before the
+client can dequeue the buffer. It is refused - and the frame copied - when
+the dma-buf is smaller than the hardware will read; see kernel 0014 for what
+happened before that check existed. `import-dmabuf=0` in the device file
+turns it off for comparison.
+
+**Read the JPEG quality back out of the bitrate.** `m2m-video` is the only
+mode in which ustreamer passes the dma-buf, and it has no quality control: it
+converts `--quality` into a bitrate. The quality factor is pinned here (it
+has to be, or identical frames stop encoding identically), so the bitrate did
+nothing and every quality encoded as 80. The conversion is deterministic and
+one-to-one over 1-100, so the plugin runs it forward for every quality and
+accepts only an exact match - no floating-point inverse, and a bitrate from
+any other client or formula changes nothing. It is resolved when the JPEG
+configuration is applied rather than when the control arrives, because
+ustreamer sets controls before its format and the encoder does not yet know
+it is a JPEG one.
+
+Measured at 1080p60:
+
+| | before | after |
+|---|---|---|
+| ustreamer, as kvmd runs it (static screen, H.264 sink up) | 86% | 9% |
+| ustreamer, JPEG streaming continuously | 89% | 18% |
+| JPEG delivered | 30 fps | ~45 fps |
+| ustreamer with H.264 sink encoding (JPEG zero-copy in both) | 55% | 4% |
+
+The JPEG output is byte-identical to `m2m-image` at q30, q50, q80 and q95 -
+each checked between two `m2m-image` runs, so a changing screen cannot pass
+for a match - which also means `--drop-same-frames` keeps working: a static
+screen still goes out at 1 fps. The H.264 stream decodes cleanly and matches
+the copy path's quality.
+
+The wrapper switched to `--encoder=m2m-video` to get this. Without 0014 (or
+on any capture buffer that is too small), the plugin copies and the stream
+behaves exactly as `m2m-image` did.
+
 ## Deliberate compromises
 
 **cpufreq is a module, loaded after the rootfs is up.** It used to be off
@@ -933,13 +1036,20 @@ does and does not guarantee:
 
 * **One hard ordering dependency.** 0011 needs 0007: both add entries to
   `rkisp1_v4l2_ioctl_ops`, and 0011's context contains 0007's. Everything
-  else applies standalone to a clean tree. 0013 touches the same board DTS as
+  else applies standalone to a clean tree, 0014 included - it shares
+  `capture.c` with 0004, 0007 and 0011 but touches only `queue_setup`. 0013 touches the same board DTS as
   0001 but edits nodes that were already there, so it does not depend on it -
   verified by regenerating both against a clean tree and confirming the
   resulting DTS was byte-for-byte what the old five-patch series produced.
 * **0012 depends on 0005 semantically, not textually.** It applies cleanly
   without it and then computes against a 310 MHz link — silently low. There
   is no guard for this beyond the ordering; see "The trap in it" above.
+* **libv4l-rkmpp/0003 and kernel 0014 depend on each other across two
+  builds**, the kernel and the rootfs, and the failure modes are not
+  symmetric. 0003 without 0014 is safe: the plugin sees a short buffer and
+  copies, so nothing is gained and nothing breaks. 0014 without 0003 is
+  harmless: 30 KB more per buffer that nobody reads. What must never ship is
+  0003 with its size check removed - that is the VPU hang 0014 describes.
 * **0001 is a plain unified diff**, not `git format-patch` output: it has no
   `diff --git` or `index` line, because it is generated by diffing the board
   DTS against `HEAD`'s copy. `git apply` takes it happily; `git apply --3way`
