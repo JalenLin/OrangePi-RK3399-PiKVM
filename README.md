@@ -18,11 +18,11 @@ Verified on hardware, not inferred from config symbols:
 | **MJPEG** | encoded on the SoC's VPU straight from the capture buffer, 10-40% of one core at 1080p, depending on how well the picture compresses |
 | **H.264 / WebRTC** | same VPU, Constrained Baseline 1080p, `kvmd-janus` and `kvmd-media` serving |
 | **HID** | keyboard and mouse over the Type-C port, verified end to end against a real target |
-| **Mass storage** | ISO/CD-ROM emulation, read back from the target; store expands to fill the card on first boot |
+| **Mass storage** | ISO/CD-ROM emulation, read back from the target; store expands to fill the card on first boot; or an ISO at an HTTP/SMB/SFTP URL, attached without copying it to the board |
 | **Network** | gigabit ethernet; Wi-Fi on mainline `brcmfmac` (AP6356S) |
 | **Storage** | SD card or the onboard 14.6 GB eMMC, booted and verified on both |
-| **Kernel** | Rockchip BSP 6.12.69, with 14 patches |
-| **Userland** | Arch Linux ARM + PiKVM's own packages, systemd 261 |
+| **Kernel** | Rockchip BSP 6.12.69, with 15 patches |
+| **Userland** | Arch Linux ARM + PiKVM's own packages, systemd 262, kvmd 4.224 |
 
 **HDMI IN audio does not work** and is parked — the receiver's I2S is wired to
 the audio codec rather than to the SoC. See

@@ -726,6 +726,9 @@ Checked and rejected:
   `patches/libv4l-rkmpp/0002` gets ustreamer onto it, so `--h264-sink` is in
   `main.yaml` and `kvmd-media`/`kvmd-janus` are enabled. Both verified on
   hardware.
+* **Remote images** - an ISO at an HTTP, SMB or SFTP URL, attached as the
+  virtual drive without being copied to the board. Kernel 0015 (PiKVM's own
+  nbd patch) plus `CONFIG_BLK_DEV_NBD`; verified over HTTP against the target.
 * **HDMI output** - the console comes up on it at 1080p60; verified by
   looping the board's HDMI OUT into its own HDMI IN and capturing it.
   Hot-plug works both ways.

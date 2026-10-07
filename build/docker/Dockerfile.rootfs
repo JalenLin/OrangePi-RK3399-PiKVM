@@ -278,9 +278,10 @@ RUN systemctl enable \
         kvmd-vnc \
         kvmd-webterm \
         kvmd-tc358743 \
+        kvmd-nbd \
         pikvm-expand-msd
 
-# WebRTC, and only on the variant that can feed it.
+# WebRTC.
 #
 # Both of these consume the H.264 memsink ustreamer publishes: kvmd-media
 # serves it over /api/media/ws, kvmd-janus over WebRTC. Neither has a

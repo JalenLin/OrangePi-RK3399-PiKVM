@@ -1,6 +1,6 @@
 # The patches, and why each one exists
 
-Fourteen kernel patches, one U-Boot patch and three userspace ones. They are
+Fifteen kernel patches, one U-Boot patch and four userspace ones. They are
 applied in filename order by plain `git apply` — no fuzz, no `--3way` — so a
 patch either applies or the build stops.
 
@@ -13,8 +13,10 @@ They are not all the same kind of thing, and the split is deliberate:
 | **0003–0012** | driver fixes | bugs anyone on this hardware hits. One fix per patch, so they stay submittable |
 | **0013** | codec rail voltages | a defect the upstream DTS has too — mainline's copy of this board file is byte-for-byte identical |
 | **0014** | capture buffer allocation | makes the ISP's buffers safe to hand to the VPU as they are; harmless to every other consumer |
+| **0015** | NBD without CAP_SYS_ADMIN | PiKVM's own kernel patch, unchanged; what kvmd's remote images need |
 | **uboot/0001** | autoboot delay and console rate | two defconfig lines; the difference between a debuggable board and one you can only recover over USB |
 | **libv4l-rkmpp/0001–0003** | userspace | applied inside the rootfs build |
+| **v4l-utils/0001** | libv4l2 | a thread-safety fix; also inside the rootfs build |
 
 If you add one, keep that distinction. A patch that mixes a board choice with
 a driver fix cannot be sent anywhere.
@@ -676,6 +678,36 @@ The plugin checks the size before it imports and copies a buffer that is too
 short, so without this patch nothing breaks - every frame is just copied, as
 before. With it, 1080p capture buffers pass the check and the copy is gone.
 720p never needed it: 720 is already a multiple of 16.
+
+## 0015 — nbd: let kvmd-nbd drive its device without CAP_SYS_ADMIN
+
+`drivers/block/nbd.c`. Not ours: PiKVM's own kernel carries it as
+`1401-pikvm-nbd-fine-tuning.patch` in `packages/linux-rpi-pikvm`, and it is
+applied here unchanged, with its attribution kept in the patch header.
+
+kvmd can present an image that is not on the board at all - an ISO at an
+HTTP, SMB or SFTP URL - by serving it through `kvmd-nbd` on `/dev/nbd15`.
+That needs `CONFIG_BLK_DEV_NBD`, which this kernel never had (kvmd asked
+for the module from the first image and logged "NBD is not available"),
+and `kvmd-nbd` enabled. With both, the URL was accepted and attaching it
+failed:
+
+```
+kvmd.nbd.device  ERROR --- NbdDeviceError: Ioctl NBD_SET_BLKSIZE error:
+                           PermissionError: [Errno 1] Operation not permitted
+```
+
+Stock nbd refuses every ioctl from a process without `CAP_SYS_ADMIN`, and
+`kvmd-nbd` runs unprivileged by design. The patch drops that check and
+leaves the permission on the device node, which `99-kvmd-common.rules`
+gives to the `kvmd-nbd` group; it also sets the read-only flag from
+`NBD_FLAG_READ_ONLY` (`BLKROSET` would need the capability again), raises
+online/offline uevents around `NBD_DO_IT`, and adds the sysfs `disconnect`
+file the same rule hands to that group. Granting the daemon the capability
+instead would have given a network-facing process most of root.
+
+Verified: a 4 MB image served over HTTP from another machine, attached as
+the CD-ROM, read back on the target with a matching SHA-256.
 
 ## uboot/0001 — an autoboot you can interrupt, at a rate you can type at
 
