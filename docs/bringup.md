@@ -157,11 +157,12 @@ top -b -c -n2 -d2 | grep kvmd/streamer | tail -1
 ```
 
 Expect VEPU2 sessions with `format` `mjpeg` (two, one per JPEG worker), plus
-an `h264` one once something reads the H.264 sink, and the streamer at
-10-40% of one core at 1080p, depending on how well the picture compresses. The command line should show `--encoder=m2m-video`. If it
-says `--encoder=cpu`, the wrapper in `/usr/lib/pikvm/ustreamer-encoder` did
-not find the hardware path and fell back to software JPEG, which costs about
-three cores; the wrapper's tests say what it looks for.
+an `h264` one for the WebRTC/VNC sink, and the streamer at 10-40% of one core
+at 1080p, depending on how well the picture compresses. The command line
+should show `--encoder=m2m-video`. If it says `--encoder=cpu`, the wrapper in
+`/usr/lib/pikvm/ustreamer-encoder` did not find the hardware path and fell
+back to software JPEG, which costs about three cores; the wrapper's tests say
+what it looks for.
 
 ## 8. HDMI output
 

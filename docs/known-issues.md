@@ -115,7 +115,13 @@ asks for and this board does not have or does not use:
 And a handful of one-liners: `sip_smc_get_dram_map: request share memory
 error!`, `dw-apb-uart ...: failed to request DMA, use interrupt mode`,
 `Failed to find module 'autofs4'`, `cacheinfo: Unable to detect cache
-hierarchy`, `efi: UEFI not found`.
+hierarchy`, `efi: UEFI not found`, `pvtm list NULL`, `debugfs: Directory
+'ff9a0000.gpu-mali' with parent 'vdd_gpu' already present!`.
+
+On the first boot only, systemd also logs `Failed to preset all unit: Unit
+... is masked` for systemd-homed, -nsresourced and -userdbd. They are masked
+on purpose (Dockerfile.rootfs says why), and the first-boot preset pass
+complains about every masked unit it would otherwise have enabled.
 
 ## ATX power control ships disabled
 
