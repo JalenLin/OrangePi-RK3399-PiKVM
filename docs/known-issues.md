@@ -73,14 +73,49 @@ throttle, through its own thermal zones, which kvmd would not understand.
 
 ## Non-fatal boot messages
 
-All three are cosmetic and expected:
+All cosmetic. Taken from `journalctl -k -b` on a board running the current
+image, not from `docs/logs/rk612-boot-ok.log`, which predates several of the
+fixes and prints a different set. Most are optional resources a vendor driver
+asks for and this board does not have or does not use:
 
-* `dwhdmi-rockchip: error -ENXIO: IRQ index 1 not found` — the
+* `Disabling critical pclk_rkpwm_pmu`, then `WARNING: ... clk_core_disable`
+  with a full backtrace through `rockchip_pwm_probe` - the most alarming thing
+  in the boot, and harmless. The PWM driver turns its bus clock off at the end
+  of probe; this one belongs to the PMU PWM that drives `vdd_log`, is marked
+  critical, and the clock framework warns and leaves it on. Checked
+  afterwards: enable count 1, `vdd_log` at 0.998 V.
+* `dwhdmi-rockchip ...: error -ENXIO: IRQ index 1 not found` - the
   mainline-derived HDMI node has one interrupt; the BSP driver wants two.
-* `hdmi-sound` deferred with `asoc-simple-card: parse error` — no HDMI audio
-  *output*. Unrelated to HDMI IN audio above.
-* `failed to parse resources for logo display` — the vendor U-Boot splash
-  handoff, which this image does not use.
+* `rockchip-drm display-subsystem: failed to parse resources for logo
+  display` - the vendor U-Boot splash handoff, which this image does not use.
+  HDMI output works regardless: the console comes up on it at 1080p60.
+* `platform hdmi-sound: deferred probe pending: asoc-simple-card: parse error`
+  - no HDMI audio *output*. Unrelated to HDMI IN audio above.
+* `platform mtd_vendor_storage: deferred probe pending` - the MTD backend of
+  Rockchip's vendor storage area. Nothing on this image reads it.
+* `rockchip-usb2phy ...: error -ENXIO: IRQ index 0 not found`, for both PHYs.
+  USB works.
+* `midgard ...gpu: error -ENXIO: IRQ JOB/MMU/GPU not found` - the Mali.
+  Nothing on this image uses it.
+* `rga: rga iommu bind failed!` - the 2D accelerator, likewise unused.
+* `rk_gmac-dwmac ...: IRQ sfty / eth_wake_irq / eth_lpi not found` and
+  `cannot get clock clk_mac_speed` - optional resources. Gigabit ethernet
+  works.
+* `rt5651 1-001a: Failed to request IRQ 0` and `cannot get spk-con-gpio` - the
+  codec's jack-detect interrupt and speaker-amp switch, neither wired here.
+* `rockchip-mipi-dphy-rx ...: error -EINVAL: invalid resource (null)` - an
+  optional register range. Capture works at 1080p60.
+* `brcmfmac ...: Direct firmware load for brcm/brcmfmac4356-sdio.AP6356S.bin
+  failed` - brcmfmac tries a board-specific file name first and falls back to
+  the generic one.
+* `Bluetooth: hci0: BCM: firmware Patch file not found` - no patch file is
+  shipped for the BCM4356's Bluetooth half. Nothing on this image uses
+  Bluetooth, and it has not been tested.
+
+And a handful of one-liners: `sip_smc_get_dram_map: request share memory
+error!`, `dw-apb-uart ...: failed to request DMA, use interrupt mode`,
+`Failed to find module 'autofs4'`, `cacheinfo: Unable to detect cache
+hierarchy`, `efi: UEFI not found`.
 
 ## ATX power control ships disabled
 
@@ -127,10 +162,39 @@ frames, against 24% before). **800x600p60 and 720x400p70 are unverified** —
 the formula says the old table under-served them too, so they should have been
 broken before and clean now, but nobody has looked.
 
+## Two media carrying the same image collide
+
+Write an SD-family image to the eMMC, leave an SD-family card in the slot, and
+both partition 4s carry `614e0000-0000-4b53-8000-1d28000054a9`.
+`root=PARTUUID=` then matches two devices, the kernel takes one of them, and
+when that is the wrong one the board drops into emergency mode. Found the
+expensive way.
+
+This is what the two image families are for: `make image` for cards,
+`make emmc-image` for the eMMC, and the `615e` prefix keeps them apart. It
+applies to the mainline track as well — mainline fixes the *bootloader* half
+of this (no more `root=` guessed from the medium) and does nothing about the
+kernel's own lookup. See docs/image-layout.md.
+
+## Mainline U-Boot works, but it is not the default
+
+`UBOOT_TRACK=mainline` builds U-Boot 2025.07 with BL31 from TF-A 2.12, and it
+boots PiKVM end to end through `/boot/extlinux/extlinux.conf`, from the eMMC
+and from a card. It is no longer a plan; docs/roadmap.md has the
+measurements. Three things to know before switching to it:
+
+* **Do not mix tracks across media.** A BSP-track card in the slot of a
+  mainline board is scanned, rejected and skipped; a BSP bootloader on the
+  eMMC boots a mainline card *the BSP way*, using none of mainline. All four
+  combinations are tabulated in docs/emmc.md.
+* **The `trust` partition is unused** — mainline packs BL31 inside
+  `u-boot.itb` — so partition 2 reads back as zeros. That is not damage.
+* **The four BSP-only kernel patches are still applied.** They are dead weight
+  under mainline rather than a problem, and dropping them means dropping the
+  BSP track, which every card in existence runs. docs/roadmap.md names them.
+
 ## Deliberately not done
 
 **Read-only root.** Considered and declined. The wear mitigations that are in
 place instead — journal to RAM, `commit=600`, MSD mounted `ro` except during
 writes — are in docs/image-layout.md.
-
-**Mainline U-Boot.** See docs/roadmap.md.

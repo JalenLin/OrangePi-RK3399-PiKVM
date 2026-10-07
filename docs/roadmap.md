@@ -653,9 +653,13 @@ Checked and rejected:
 ## Still open
 
 * **Capture** - working at 1080p60. See docs/capture.md.
-* **`kvmd-otg`** - no `/dev/hidg*`; the OTG port is probably not in
-  peripheral mode.
-* **`display-subsystem`** deferred, so HDMI output stays black.
+* **`kvmd-otg`** - done. Patch 0001 puts the Type-C dwc3 into peripheral mode
+  so a UDC exists at all, and 0008 gives the CD-ROM LUN its own inquiry
+  string. `/dev/hidg0..2` are present on every boot since, and keyboard,
+  mouse and the mass-storage device are all verified against a real target.
+* **HDMI output** - works. The console comes up on it at 1080p60; verified
+  by looping the board's HDMI OUT into its own HDMI IN and capturing it.
+  Hot-plug works both ways.
 * **H.264 and WebRTC** - done. Patch 0001 enables VEPU2 and
   `patches/libv4l-rkmpp/0002` gets ustreamer onto it, so `--h264-sink` is in
   `main.yaml` and `kvmd-media`/`kvmd-janus` are enabled on the rkmpp variant.
