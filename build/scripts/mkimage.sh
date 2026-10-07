@@ -39,8 +39,9 @@ mainline)
                 "${OUTPUT}/uboot-mainline/u-boot.itb"
                 "${OUTPUT}/kernel/Image"
                 "${OUTPUT}/kernel/${KERNEL_RK612_DTB}.dtb" )
-    # /boot/pikvm rather than /boot: the Arch kernel package already owns
-    # /boot/Image and /boot/dtbs, and neither is ours. Paths in extlinux.conf
+    # /boot/pikvm rather than /boot itself, so that nothing of ours can collide
+    # with a kernel package's /boot/Image or /boot/dtbs should one ever be
+    # installed (Dockerfile.rootfs removes Arch's). Paths in extlinux.conf
     # are absolute from the start of the partition, not relative to the
     # directory the file was found in.
     BOOT_SETUP="

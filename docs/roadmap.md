@@ -476,9 +476,10 @@ track only:
 /boot/extlinux/extlinux.conf
 ```
 
-`/boot/pikvm/` and not `/boot/`, because the Arch kernel package already owns
-`/boot/Image` and `/boot/dtbs` and neither is ours. Paths inside
-`extlinux.conf` are absolute from the start of the partition.
+`/boot/pikvm/` and not `/boot/`, so nothing of ours can collide with a kernel
+package's `/boot/Image` or `/boot/dtbs`. Arch's own kernel used to sit there;
+the rootfs build now removes it, but the separate directory costs nothing.
+Paths inside `extlinux.conf` are absolute from the start of the partition.
 
 **The rootfs partition has to be marked bootable**, and this is the piece that
 cost an evening. `cmd/bootflow.c` sets `BOOTFLOWIF_ONLY_BOOTABLE`

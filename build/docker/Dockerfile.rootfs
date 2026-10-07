@@ -33,6 +33,16 @@ RUN pacman-key --init \
  && pacman -Sy --noconfirm --needed archlinuxarm-keyring \
  && pacman-key --populate archlinuxarm
 
+# The ALARM tarball comes with Arch's own generic kernel, and nothing here
+# boots it: this board runs our 6.12 BSP kernel, from the raw boot partition
+# or from /boot/pikvm. Left in, it was ~430 MB of image, modules, dtbs and an
+# initramfs that every pacman -Syu would rebuild - under qemu, twice per build,
+# once per stage. Nothing depends on it ("Required By: None"); mkinitcpio only
+# exists to build its initramfs, so it goes too. diffutils, pulled in with
+# mkinitcpio, stays: diff is worth having on the board.
+RUN pacman -Rn --noconfirm linux-aarch64 mkinitcpio mkinitcpio-busybox \
+ && rm -f /boot/initramfs-linux*.img
+
 # SigLevel=Never for this repo only: PiKVM signs its packages, but their key
 # is not in any keyring we can populate from here, and pacman's prefix syntax
 # has no "accept an untrusted signature" middle ground worth the complexity.
