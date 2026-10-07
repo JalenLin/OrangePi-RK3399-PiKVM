@@ -106,9 +106,9 @@ kvmd:
             # screen is not changing, which is also when there is nothing to
             # see; once something moves, frames flow at the 33 ms median.
             # This setting was briefly suspected of being the "laggy mouse"
-            # everyone could feel - it was not. That was a target-side USB
-            # fault; see docs/known-issues.md. Lower it to 5, or 0, if the stream
-            # itself ever feels late rather than the input.
+            # everyone could feel - it was not; the cause was on the target,
+            # not in the streamer. Lower it to 5, or 0, if the stream itself
+            # ever feels late rather than the input.
             - "--drop-same-frames=30"
             - "--unix={unix}"
             - "--unix-rm"
